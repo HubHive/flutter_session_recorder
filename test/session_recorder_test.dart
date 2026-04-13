@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' as widgets;
-import 'package:flutter_screen_recorder/flutter_screen_recorder.dart';
+import 'package:flutter_session_recorder/flutter_session_recorder.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';

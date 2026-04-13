@@ -33,7 +33,7 @@ class DebugPrintSessionRecorderTransport implements SessionRecorderTransport {
   @override
   Future<void> send(SessionBatch batch) async {
     debugPrint(
-      '[flutter_screen_recorder transport] ${jsonEncode(batch.toJson())}',
+      '[flutter_session_recorder transport] ${jsonEncode(batch.toJson())}',
     );
   }
 
@@ -42,7 +42,7 @@ class DebugPrintSessionRecorderTransport implements SessionRecorderTransport {
     final String frameRef =
         'debug_${upload.sessionId}_${upload.timestamp.microsecondsSinceEpoch}';
     debugPrint(
-      '[flutter_screen_recorder transport] ${jsonEncode(<String, Object?>{
+      '[flutter_session_recorder transport] ${jsonEncode(<String, Object?>{
             'type': 'replay.keyframe.upload',
             'frameRef': frameRef,
             'sessionId': upload.sessionId,

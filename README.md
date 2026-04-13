@@ -1,4 +1,4 @@
-# flutter_screen_recorder
+# flutter_session_recorder
 
 A Flutter session replay SDK built around a hybrid capture model:
 
@@ -68,7 +68,7 @@ await recorder.runApp(
 );
 ```
 
-`recorder.runApp(...)` intentionally calls Flutter's `runApp(...)` in the current zone to avoid Flutter zone mismatch errors when your app already called `WidgetsFlutterBinding.ensureInitialized()`. The recorder captures `debugPrint`, Flutter errors, and platform errors; raw `print()` interception should be handled by an app-owned zone before binding initialization if you need it.
+`recorder.runApp(...)` calls Flutter's `runApp(...)` in the current zone so it stays compatible with apps that call `WidgetsFlutterBinding.ensureInitialized()` during bootstrap. The recorder captures `debugPrint`, Flutter errors, platform errors, and explicit `recorder.log(...)` calls. Raw `print()` interception should be handled by an app-owned zone before binding initialization if you need it.
 
 ## Keyframes
 
@@ -211,3 +211,9 @@ const SessionRecorderConfig.lightweight(
 - `uploadKeyframe(SessionKeyframeUpload upload)` for binary frame uploads
 
 The default HTTP transport accepts the recorder service root as `endpoint`, posts event batches to `/sessions`, and posts keyframes to `/frames`.
+
+## License
+
+This package is licensed under the Apache License, Version 2.0.
+
+The software is provided on an "AS IS" basis without warranties or conditions of any kind, and the license includes a limitation of liability for contributors. That said, this package records session data, so apps that use it are responsible for their own user consent, privacy notices, data retention, sensitive-data handling, and legal/compliance review before shipping it to end users.

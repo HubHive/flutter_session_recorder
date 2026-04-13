@@ -54,7 +54,7 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
-  flutter_screen_recorder:
+  flutter_session_recorder:
     dependency: "direct main"
     description:
       path: ".."

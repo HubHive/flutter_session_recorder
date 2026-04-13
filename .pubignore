@@ -1,0 +1,5 @@
+.dart_tool/
+.DS_Store
+.flutter-plugins-dependencies
+build/
+screen_recorder_server/

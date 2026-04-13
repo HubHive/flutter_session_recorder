@@ -16,7 +16,7 @@ final Recorder recorder = Recorder._();
 
 class Recorder with widgets.WidgetsBindingObserver {
   static const String _internalLogPrefix =
-      '[flutter_screen_recorder transport]';
+      '[flutter_session_recorder transport]';
 
   Recorder._();
 
@@ -150,7 +150,7 @@ class Recorder with widgets.WidgetsBindingObserver {
         FlutterErrorDetails(
           exception: error,
           stack: stackTrace,
-          library: 'flutter_screen_recorder',
+          library: 'flutter_session_recorder',
           context: ErrorDescription('while starting the Flutter application'),
         ),
       );

@@ -1,4 +1,4 @@
-name: flutter_screen_recorder_example
+name: flutter_session_recorder_example
 publish_to: "none"
 
 environment:
@@ -8,7 +8,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_screen_recorder:
+  flutter_session_recorder:
     path: ..
 
 dev_dependencies:

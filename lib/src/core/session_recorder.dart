@@ -606,7 +606,7 @@ class SessionRecorder {
         FlutterErrorDetails(
           exception: error,
           stack: stackTrace,
-          library: 'flutter_screen_recorder',
+          library: 'flutter_session_recorder',
           context: ErrorDescription('while uploading a session batch'),
         ),
       );
@@ -752,7 +752,7 @@ class SessionRecorder {
           FlutterErrorDetails(
             exception: error,
             stack: stackTrace,
-            library: 'flutter_screen_recorder',
+            library: 'flutter_session_recorder',
             context:
                 ErrorDescription('while listening to native replay events'),
           ),
@@ -767,7 +767,7 @@ class SessionRecorder {
         FlutterErrorDetails(
           exception: error,
           stack: stackTrace,
-          library: 'flutter_screen_recorder',
+          library: 'flutter_session_recorder',
           context: ErrorDescription('while starting native capture'),
         ),
       );
@@ -782,7 +782,7 @@ class SessionRecorder {
         FlutterErrorDetails(
           exception: error,
           stack: stackTrace,
-          library: 'flutter_screen_recorder',
+          library: 'flutter_session_recorder',
           context: ErrorDescription('while stopping native capture'),
         ),
       );
@@ -801,7 +801,7 @@ class SessionRecorder {
         FlutterErrorDetails(
           exception: error,
           stack: stackTrace,
-          library: 'flutter_screen_recorder',
+          library: 'flutter_session_recorder',
           context: ErrorDescription('while pausing native capture'),
         ),
       );
@@ -821,7 +821,7 @@ class SessionRecorder {
         FlutterErrorDetails(
           exception: error,
           stack: stackTrace,
-          library: 'flutter_screen_recorder',
+          library: 'flutter_session_recorder',
           context: ErrorDescription('while resuming native capture'),
         ),
       );

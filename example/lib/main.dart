@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_screen_recorder/flutter_screen_recorder.dart';
+import 'package:flutter_session_recorder/flutter_session_recorder.dart';
 
 Future<void> main() async {
   await recorder.runApp(

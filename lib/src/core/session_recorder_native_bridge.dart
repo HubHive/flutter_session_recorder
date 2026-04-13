@@ -26,9 +26,9 @@ class MethodChannelSessionRecorderNativeBridge
     MethodChannel? methodChannel,
     EventChannel? eventChannel,
   })  : _methodChannel = methodChannel ??
-            const MethodChannel('flutter_screen_recorder/methods'),
+            const MethodChannel('flutter_session_recorder/methods'),
         _eventChannel = eventChannel ??
-            const EventChannel('flutter_screen_recorder/events');
+            const EventChannel('flutter_session_recorder/events');
 
   final EventChannel _eventChannel;
   final MethodChannel _methodChannel;
