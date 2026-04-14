@@ -10,6 +10,8 @@ abstract class SessionRecorderTransport {
   Future<void> send(SessionBatch batch);
 
   Future<UploadedKeyframe> uploadKeyframe(SessionKeyframeUpload upload);
+
+  Future<bool> checkRecordingAccess();
 }
 
 class NoopSessionRecorderTransport implements SessionRecorderTransport {
@@ -24,6 +26,11 @@ class NoopSessionRecorderTransport implements SessionRecorderTransport {
       frameRef:
           'noop_${upload.sessionId}_${upload.timestamp.microsecondsSinceEpoch}',
     );
+  }
+
+  @override
+  Future<bool> checkRecordingAccess() async {
+    return true;
   }
 }
 
@@ -56,6 +63,17 @@ class DebugPrintSessionRecorderTransport implements SessionRecorderTransport {
     );
     return UploadedKeyframe(frameRef: frameRef);
   }
+
+  @override
+  Future<bool> checkRecordingAccess() async {
+    debugPrint(
+      '[flutter_session_recorder transport] ${jsonEncode(<String, Object?>{
+            'type': 'recording_access.check',
+            'allowed': true,
+          })}',
+    );
+    return true;
+  }
 }
 
 class HttpSessionRecorderTransport implements SessionRecorderTransport {
@@ -74,12 +92,15 @@ class HttpSessionRecorderTransport implements SessionRecorderTransport {
         _headers = Map<String, String>.unmodifiable(headers),
         _frameEndpoint =
             frameEndpoint ?? _defaultUploadEndpoint(endpoint, 'frames'),
+        _recordingAccessEndpoint =
+            _defaultUploadEndpoint(endpoint, 'recording-access-test'),
         _client = client ?? http.Client();
 
   final String? apiKey;
   final Uri baseEndpoint;
   final Uri endpoint;
   final Uri _frameEndpoint;
+  final Uri _recordingAccessEndpoint;
   final Map<String, String> _headers;
   final http.Client _client;
 
@@ -103,6 +124,7 @@ class HttpSessionRecorderTransport implements SessionRecorderTransport {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw SessionRecorderTransportException(
         'Failed to upload session batch (${response.statusCode}): ${response.body}',
+        statusCode: response.statusCode,
       );
     }
   }
@@ -137,6 +159,7 @@ class HttpSessionRecorderTransport implements SessionRecorderTransport {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw SessionRecorderTransportException(
         'Failed to upload keyframe (${response.statusCode}): $responseBody',
+        statusCode: response.statusCode,
       );
     }
 
@@ -153,6 +176,26 @@ class HttpSessionRecorderTransport implements SessionRecorderTransport {
         '${upload.sessionId}_${upload.timestamp.microsecondsSinceEpoch}';
 
     return UploadedKeyframe(frameRef: frameRef);
+  }
+
+  @override
+  Future<bool> checkRecordingAccess() async {
+    final http.Response response = await _client.get(
+      _recordingAccessEndpoint,
+      headers: _baseHeaders(),
+    );
+
+    if (response.statusCode == 200) {
+      return true;
+    }
+    if (response.statusCode == 403) {
+      return false;
+    }
+
+    throw SessionRecorderTransportException(
+      'Failed to check recording access (${response.statusCode}): ${response.body}',
+      statusCode: response.statusCode,
+    );
   }
 
   Map<String, String> _baseHeaders() {
@@ -175,9 +218,15 @@ class HttpSessionRecorderTransport implements SessionRecorderTransport {
 }
 
 class SessionRecorderTransportException implements Exception {
-  const SessionRecorderTransportException(this.message);
+  const SessionRecorderTransportException(
+    this.message, {
+    this.statusCode,
+  });
 
   final String message;
+  final int? statusCode;
+
+  bool get isForbidden => statusCode == 403;
 
   @override
   String toString() => 'SessionRecorderTransportException($message)';

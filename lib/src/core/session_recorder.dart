@@ -42,8 +42,11 @@ class SessionRecorder {
   final List<ScreenViewListener> _screenViewListeners = <ScreenViewListener>[];
 
   Timer? _flushTimer;
+  Timer? _recordingAccessCheckTimer;
   StreamSubscription<Map<String, Object?>>? _nativeEventSubscription;
   DateTime? _pausedAt;
+  bool _isCheckingRecordingAccess = false;
+  bool _isRecordingAccessDenied = false;
   bool _isCapturePaused = false;
   bool _isFlushing = false;
   String? _sessionId;
@@ -56,6 +59,8 @@ class SessionRecorder {
   bool get isRecording => _sessionId != null;
 
   bool get isCapturePaused => _isCapturePaused;
+
+  bool get isRecordingAccessDenied => _isRecordingAccessDenied;
 
   String? get sessionId => _sessionId;
 
@@ -148,6 +153,8 @@ class SessionRecorder {
 
     _flushTimer?.cancel();
     _flushTimer = null;
+    _recordingAccessCheckTimer?.cancel();
+    _recordingAccessCheckTimer = null;
     await _stopNativeCapture();
 
     _enqueue(
@@ -168,6 +175,8 @@ class SessionRecorder {
       _sessionHistory.clear();
       _pausedAt = null;
       _sessionId = null;
+      _isRecordingAccessDenied = false;
+      _isCheckingRecordingAccess = false;
       _isCapturePaused = false;
       _sessionContext = <String, Object?>{};
       _startedAt = null;
@@ -298,6 +307,9 @@ class SessionRecorder {
     String reason = 'app_foregrounded',
   }) async {
     if (!isRecording || !_isCapturePaused) {
+      return;
+    }
+    if (_isRecordingAccessDenied) {
       return;
     }
 
@@ -534,25 +546,44 @@ class SessionRecorder {
     required Map<String, Object?> viewport,
   }) async {
     final String? activeSessionId = _sessionId;
-    if (activeSessionId == null || _isCapturePaused) {
+    if (activeSessionId == null ||
+        _isCapturePaused ||
+        _isRecordingAccessDenied) {
       return;
     }
 
     final DateTime timestamp = _now().toUtc();
-    final UploadedKeyframe uploadedKeyframe = await transport.uploadKeyframe(
-      SessionKeyframeUpload(
-        bytes: bytes,
-        format: format,
-        metadata: metadata,
-        reason: reason,
-        screenName: screenName,
-        sessionId: activeSessionId,
-        timestamp: timestamp,
-        viewport: viewport,
-      ),
+    final SessionKeyframeUpload upload = SessionKeyframeUpload(
+      bytes: bytes,
+      format: format,
+      metadata: metadata,
+      reason: reason,
+      screenName: screenName,
+      sessionId: activeSessionId,
+      timestamp: timestamp,
+      viewport: viewport,
     );
+    late final UploadedKeyframe uploadedKeyframe;
+    try {
+      uploadedKeyframe = await transport.uploadKeyframe(upload);
+    } catch (error, stackTrace) {
+      if (await _handleTransportError(error)) {
+        return;
+      }
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'flutter_session_recorder',
+          context: ErrorDescription('while uploading a keyframe'),
+        ),
+      );
+      rethrow;
+    }
 
-    if (_sessionId != activeSessionId || _isCapturePaused) {
+    if (_sessionId != activeSessionId ||
+        _isCapturePaused ||
+        _isRecordingAccessDenied) {
       return;
     }
 
@@ -576,6 +607,7 @@ class SessionRecorder {
     final String? sessionId = _sessionId;
     final DateTime? startedAt = _startedAt;
     if (_isFlushing ||
+        _isRecordingAccessDenied ||
         sessionId == null ||
         startedAt == null ||
         _buffer.isEmpty) {
@@ -601,6 +633,9 @@ class SessionRecorder {
         ),
       );
     } catch (error, stackTrace) {
+      if (await _handleTransportError(error)) {
+        return;
+      }
       _buffer.insertAll(0, events);
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -623,7 +658,9 @@ class SessionRecorder {
     RecorderEvent event, {
     bool allowWhilePaused = false,
   }) {
-    if (!isRecording || (_isCapturePaused && !allowWhilePaused)) {
+    if (!isRecording ||
+        _isRecordingAccessDenied ||
+        (_isCapturePaused && !allowWhilePaused)) {
       return;
     }
 
@@ -650,6 +687,9 @@ class SessionRecorder {
   }
 
   void _startFlushTimer() {
+    if (_isRecordingAccessDenied) {
+      return;
+    }
     _flushTimer?.cancel();
     _flushTimer = Timer.periodic(config.flushInterval, (_) {
       unawaited(flush());
@@ -711,6 +751,114 @@ class SessionRecorder {
           type: nextUserId == null ? 'user.cleared' : 'user.identified',
           attributes: <String, Object?>{
             'userId': nextUserId,
+            'userProperties': _userProperties,
+          },
+        ),
+      );
+    }
+  }
+
+  Future<bool> _handleTransportError(Object error) async {
+    if (error is SessionRecorderTransportException && error.isForbidden) {
+      await _enterRecordingAccessDeniedMode();
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _enterRecordingAccessDeniedMode() async {
+    if (!isRecording || _isRecordingAccessDenied) {
+      return;
+    }
+
+    _isRecordingAccessDenied = true;
+    _isCapturePaused = true;
+    _pausedAt = _now().toUtc();
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _buffer.clear();
+    _sessionHistory.clear();
+    _notifyCaptureStateListeners(isPaused: true);
+    await _pauseNativeCapture();
+    _startRecordingAccessCheckTimer();
+  }
+
+  void _startRecordingAccessCheckTimer() {
+    _recordingAccessCheckTimer?.cancel();
+    _recordingAccessCheckTimer = Timer.periodic(
+      config.recordingAccessCheckInterval,
+      (_) => unawaited(_checkRecordingAccess()),
+    );
+  }
+
+  Future<void> _checkRecordingAccess() async {
+    if (!isRecording ||
+        !_isRecordingAccessDenied ||
+        _isCheckingRecordingAccess) {
+      return;
+    }
+
+    _isCheckingRecordingAccess = true;
+    try {
+      final bool hasAccess = await transport.checkRecordingAccess();
+      if (hasAccess) {
+        await _restoreRecordingAccess();
+      }
+    } catch (error, stackTrace) {
+      if (error is SessionRecorderTransportException && error.isForbidden) {
+        return;
+      }
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'flutter_session_recorder',
+          context: ErrorDescription('while checking recording access'),
+        ),
+      );
+    } finally {
+      _isCheckingRecordingAccess = false;
+    }
+  }
+
+  Future<void> _restoreRecordingAccess() async {
+    if (!isRecording || !_isRecordingAccessDenied) {
+      return;
+    }
+
+    final DateTime resumedAt = _now().toUtc();
+    _recordingAccessCheckTimer?.cancel();
+    _recordingAccessCheckTimer = null;
+    _buffer.clear();
+    _sessionHistory.clear();
+    _sessionId = _idGenerator();
+    _startedAt = resumedAt;
+    _isRecordingAccessDenied = false;
+    _isCapturePaused = false;
+    _pausedAt = null;
+    await _resumeNativeCapture();
+    _notifyCaptureStateListeners(isPaused: false);
+    _startFlushTimer();
+    _enqueue(
+      RecorderEvent(
+        type: 'session.started',
+        timestamp: resumedAt,
+        attributes: <String, Object?>{
+          'reason': 'recording_access_restored',
+          'sessionId': _sessionId,
+          'sessionContext': _sessionContext,
+          'userId': _userId,
+          'userProperties': _userProperties,
+          'sessionProperties': _sessionProperties,
+        },
+      ),
+    );
+    if (_userId != null || _userProperties.isNotEmpty) {
+      _enqueue(
+        RecorderEvent(
+          type: _userId == null ? 'user.cleared' : 'user.identified',
+          attributes: <String, Object?>{
+            'userId': _userId,
             'userProperties': _userProperties,
           },
         ),

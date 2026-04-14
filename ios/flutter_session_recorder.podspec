@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'flutter_session_recorder'
-  s.version          = '0.1.0'
+  s.version          = '0.1.1'
   s.summary          = 'Flutter session replay plugin with structured native capture.'
   s.description      = <<-DESC
 Structured mobile session replay plugin for Flutter with native iOS capture.

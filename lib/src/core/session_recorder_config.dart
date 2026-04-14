@@ -29,6 +29,7 @@ class SessionRecorderConfig {
     this.hybridKeyframeInterval = const Duration(seconds: 3),
     this.hybridKeyframeMaxDimension = 720,
     this.pauseOnBackground = true,
+    this.recordingAccessCheckInterval = const Duration(seconds: 30),
     this.flushInterval = const Duration(seconds: 8),
     this.backgroundSessionTimeout = const Duration(minutes: 2),
     this.maxLogLength = 4000,
@@ -72,6 +73,7 @@ class SessionRecorderConfig {
     Duration hybridKeyframeInterval = const Duration(seconds: 3),
     int hybridKeyframeMaxDimension = 720,
     bool pauseOnBackground = true,
+    Duration recordingAccessCheckInterval = const Duration(seconds: 30),
     Duration flushInterval = const Duration(seconds: 8),
     Duration? backgroundSessionTimeout = const Duration(minutes: 2),
     int maxLogLength = 4000,
@@ -113,6 +115,7 @@ class SessionRecorderConfig {
           hybridKeyframeInterval: hybridKeyframeInterval,
           hybridKeyframeMaxDimension: hybridKeyframeMaxDimension,
           pauseOnBackground: pauseOnBackground,
+          recordingAccessCheckInterval: recordingAccessCheckInterval,
           flushInterval: flushInterval,
           backgroundSessionTimeout: backgroundSessionTimeout,
           maxLogLength: maxLogLength,
@@ -154,6 +157,7 @@ class SessionRecorderConfig {
   final Duration hybridKeyframeInterval;
   final int hybridKeyframeMaxDimension;
   final bool pauseOnBackground;
+  final Duration recordingAccessCheckInterval;
   final Duration flushInterval;
   final Duration? backgroundSessionTimeout;
   final int maxLogLength;
@@ -197,6 +201,8 @@ class SessionRecorderConfig {
       'hybridKeyframeIntervalMs': hybridKeyframeInterval.inMilliseconds,
       'hybridKeyframeMaxDimension': hybridKeyframeMaxDimension,
       'pauseOnBackground': pauseOnBackground,
+      'recordingAccessCheckIntervalMs':
+          recordingAccessCheckInterval.inMilliseconds,
       'flushIntervalMs': flushInterval.inMilliseconds,
       'backgroundSessionTimeoutMs': backgroundSessionTimeout?.inMilliseconds,
       'maxLogLength': maxLogLength,

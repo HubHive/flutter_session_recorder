@@ -11,14 +11,26 @@ class _FakeTransport implements SessionRecorderTransport {
   final List<SessionBatch> batches = <SessionBatch>[];
   final List<_UploadedKeyframeRecord> uploadedKeyframes =
       <_UploadedKeyframeRecord>[];
+  int accessCheckCount = 0;
+  bool hasRecordingAccess = true;
+  Object? sendError;
+  Object? uploadError;
 
   @override
   Future<void> send(SessionBatch batch) async {
+    final Object? error = sendError;
+    if (error != null) {
+      throw error;
+    }
     batches.add(batch);
   }
 
   @override
   Future<UploadedKeyframe> uploadKeyframe(SessionKeyframeUpload upload) async {
+    final Object? error = uploadError;
+    if (error != null) {
+      throw error;
+    }
     final String frameRef =
         'frame_${uploadedKeyframes.length + 1}_${upload.reason}';
     uploadedKeyframes.add(
@@ -28,6 +40,12 @@ class _FakeTransport implements SessionRecorderTransport {
       ),
     );
     return UploadedKeyframe(frameRef: frameRef);
+  }
+
+  @override
+  Future<bool> checkRecordingAccess() async {
+    accessCheckCount += 1;
+    return hasRecordingAccess;
   }
 }
 
@@ -230,6 +248,9 @@ void main() {
     final List<Uri> requestedUrls = <Uri>[];
     final MockClient client = MockClient((http.Request request) async {
       requestedUrls.add(request.url);
+      if (request.url.path == '/recording-access-test') {
+        return http.Response('', 200);
+      }
       if (request.url.path == '/frames') {
         return http.Response('{"frameRef":"frame-from-server"}', 200);
       }
@@ -265,15 +286,32 @@ void main() {
         viewport: <String, Object?>{'width': 390, 'height': 844},
       ),
     );
+    final bool hasRecordingAccess = await transport.checkRecordingAccess();
 
     expect(
       requestedUrls,
       <Uri>[
         Uri.parse('http://recorder.test:8081/sessions'),
         Uri.parse('http://recorder.test:8081/frames'),
+        Uri.parse('http://recorder.test:8081/recording-access-test'),
       ],
     );
     expect(uploadedKeyframe.frameRef, 'frame-from-server');
+    expect(hasRecordingAccess, isTrue);
+  });
+
+  test('HTTP transport treats recording access 403 as disabled', () async {
+    final MockClient client = MockClient((http.Request request) async {
+      expect(
+          request.url, Uri.parse('http://recorder.test/recording-access-test'));
+      return http.Response('', 403);
+    });
+    final transport = HttpSessionRecorderTransport(
+      endpoint: Uri.parse('http://recorder.test'),
+      client: client,
+    );
+
+    expect(await transport.checkRecordingAccess(), isFalse);
   });
 
   test('captures native replay frames and interactions through the bridge',
@@ -381,6 +419,102 @@ void main() {
     expect(customNames, isNot(contains('while_paused')));
     expect(customNames, contains('after_resume'));
 
+    await nativeBridge.dispose();
+  });
+
+  test('403 from batch upload pauses capture and only probes access endpoint',
+      () async {
+    final transport = _FakeTransport()
+      ..sendError = const SessionRecorderTransportException(
+        'forbidden',
+        statusCode: 403,
+      )
+      ..hasRecordingAccess = false;
+    final nativeBridge = _FakeNativeBridge();
+    final sessionRecorder = SessionRecorder(
+      config: const SessionRecorderConfig.lightweight(
+        recordingAccessCheckInterval: Duration(milliseconds: 1),
+      ),
+      nativeBridge: nativeBridge,
+      transport: transport,
+    );
+    final List<bool> captureStates = <bool>[];
+    sessionRecorder.addCaptureStateListener(captureStates.add);
+
+    await sessionRecorder.start();
+    sessionRecorder.trackCustomEvent('before_forbidden');
+    await sessionRecorder.flush();
+    sessionRecorder.trackCustomEvent('while_forbidden');
+    nativeBridge.emit(
+      'interaction.tap',
+      attributes: <String, Object?>{'dx': 1, 'dy': 2},
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+
+    expect(sessionRecorder.isRecordingAccessDenied, isTrue);
+    expect(sessionRecorder.isCapturePaused, isTrue);
+    expect(nativeBridge.started, isFalse);
+    expect(captureStates, contains(true));
+    expect(transport.batches, isEmpty);
+    expect(transport.accessCheckCount, greaterThan(0));
+
+    transport.sendError = null;
+    transport.hasRecordingAccess = true;
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    sessionRecorder.trackCustomEvent('after_restore');
+    await sessionRecorder.flush();
+
+    expect(sessionRecorder.isRecordingAccessDenied, isFalse);
+    expect(sessionRecorder.isCapturePaused, isFalse);
+    expect(nativeBridge.started, isTrue);
+    expect(captureStates, contains(false));
+    expect(
+      transport.batches
+          .expand((SessionBatch batch) => batch.events)
+          .where((RecorderEvent event) => event.type == 'custom')
+          .map((RecorderEvent event) => event.attributes['name']),
+      contains('after_restore'),
+    );
+    expect(
+      transport.batches
+          .expand((SessionBatch batch) => batch.events)
+          .where((RecorderEvent event) => event.type == 'custom')
+          .map((RecorderEvent event) => event.attributes['name']),
+      isNot(contains('while_forbidden')),
+    );
+
+    await sessionRecorder.stop();
+    await nativeBridge.dispose();
+  });
+
+  test('403 from keyframe upload pauses capture without enqueuing keyframe',
+      () async {
+    final transport = _FakeTransport()
+      ..uploadError = const SessionRecorderTransportException(
+        'forbidden',
+        statusCode: 403,
+      );
+    final nativeBridge = _FakeNativeBridge();
+    final sessionRecorder = SessionRecorder(
+      config: const SessionRecorderConfig.lightweight(),
+      nativeBridge: nativeBridge,
+      transport: transport,
+    );
+
+    await sessionRecorder.start();
+    await sessionRecorder.trackKeyframe(
+      bytes: <int>[1, 2, 3],
+      reason: 'tap',
+      screenName: 'Checkout',
+      viewport: <String, Object?>{'width': 390, 'height': 844},
+    );
+
+    expect(sessionRecorder.isRecordingAccessDenied, isTrue);
+    expect(sessionRecorder.isCapturePaused, isTrue);
+    expect(sessionRecorder.buildReplayDocument()?.keyframes, isEmpty);
+    expect(nativeBridge.started, isFalse);
+
+    await sessionRecorder.stop();
     await nativeBridge.dispose();
   });
 

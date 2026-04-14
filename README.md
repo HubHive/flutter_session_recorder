@@ -203,14 +203,34 @@ const SessionRecorderConfig.lightweight(
 - short background gap: same session resumes
 - long background gap: old session closes and a new one starts on resume
 
+## Recording access control
+
+If the server returns `403 Forbidden` from either `/sessions` or `/frames`, the recorder immediately enters access-denied mode:
+
+- native and Flutter keyframe capture are paused
+- buffered recording data is dropped
+- normal uploads to `/sessions` and `/frames` stop
+- the SDK only probes `/recording-access-test`
+
+When `/recording-access-test` returns `200 OK`, capture resumes automatically. A `403` from the access test keeps recording disabled.
+
+The default probe interval is 30 seconds:
+
+```dart
+const SessionRecorderConfig.lightweight(
+  recordingAccessCheckInterval: Duration(seconds: 30),
+)
+```
+
 ## Transport contract
 
 `SessionRecorderTransport` supports two independent delivery paths:
 
 - `send(SessionBatch batch)` for JSON event batches
 - `uploadKeyframe(SessionKeyframeUpload upload)` for binary frame uploads
+- `checkRecordingAccess()` for access recovery checks
 
-The default HTTP transport accepts the recorder service root as `endpoint`, posts event batches to `/sessions`, and posts keyframes to `/frames`.
+The default HTTP transport accepts the recorder service root as `endpoint`, posts event batches to `/sessions`, posts keyframes to `/frames`, and probes recording access at `/recording-access-test`.
 
 ## License
 
