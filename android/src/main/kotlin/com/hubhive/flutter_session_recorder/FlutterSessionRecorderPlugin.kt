@@ -3,27 +3,13 @@ package com.hubhive.flutter_session_recorder
 import android.app.Activity
 import android.app.Application
 import android.content.Context
-import android.content.res.ColorStateList
-import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.text.InputType
-import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.Window
-import android.widget.CompoundButton
-import android.widget.EditText
-import android.widget.ImageView
-import android.widget.ProgressBar
-import android.widget.RatingBar
-import android.widget.ScrollView
-import android.widget.TextView
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -37,13 +23,13 @@ class FlutterSessionRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHand
     ActivityAware, EventChannel.StreamHandler {
     private lateinit var methodChannel: MethodChannel
     private lateinit var eventChannel: EventChannel
-    private lateinit var captureManager: AndroidReplayCaptureManager
+    private lateinit var captureManager: AndroidNativeCaptureManager
     private var activity: Activity? = null
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel = MethodChannel(binding.binaryMessenger, "flutter_session_recorder/methods")
         eventChannel = EventChannel(binding.binaryMessenger, "flutter_session_recorder/events")
-        captureManager = AndroidReplayCaptureManager(binding.applicationContext)
+        captureManager = AndroidNativeCaptureManager(binding.applicationContext)
         methodChannel.setMethodCallHandler(this)
         eventChannel.setStreamHandler(this)
     }
@@ -83,6 +69,14 @@ class FlutterSessionRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHand
 
             "stopCapture" -> {
                 captureManager.stop()
+                result.success(null)
+            }
+
+            "startSnapshotCapture" -> {
+                result.success(null)
+            }
+
+            "stopSnapshotCapture" -> {
                 result.success(null)
             }
 
@@ -134,7 +128,7 @@ class FlutterSessionRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHand
     }
 }
 
-private class AndroidReplayCaptureManager(
+private class AndroidNativeCaptureManager(
     private val context: Context,
 ) {
     var eventSink: EventChannel.EventSink? = null
@@ -142,37 +136,24 @@ private class AndroidReplayCaptureManager(
     private val handler = Handler(Looper.getMainLooper())
     private var activity: Activity? = null
     private var captureNativeLifecycle = true
-    private var captureNativeViewHierarchy = true
     private var captureScrolls = true
     private var captureTaps = true
     private var flutterScreenName: String? = null
     private var isStarted = false
-    private var maskAllText = false
-    private var maskTextInputs = true
     private var minimumScrollDelta = 24.0
     private var previousWindowCallback: Window.Callback? = null
     private var previousScreenName: String? = null
     private var scrollEventThrottleMs: Long = 250
-    private var snapshotIntervalMs: Long = 700
     private var viewTreeObserver: ViewTreeObserver? = null
     private var scrollListener: ViewTreeObserver.OnScrollChangedListener? = null
     private var lastScrollAtMs: Long = 0
     private var lastScrollY: Int? = null
 
-    private val snapshotRunnable = object : Runnable {
-        override fun run() {
-            emitScreenAndFrame(reason = "interval")
-            if (isStarted) {
-                handler.postDelayed(this, snapshotIntervalMs)
-            }
-        }
-    }
-
     private val lifecycleCallbacks = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) {}
         override fun onActivityStarted(activity: Activity) {}
         override fun onActivityResumed(activity: Activity) {
-            if (captureNativeLifecycle && this@AndroidReplayCaptureManager.activity === activity) {
+            if (captureNativeLifecycle && this@AndroidNativeCaptureManager.activity === activity) {
                 emitEvent(
                     type = "native.lifecycle",
                     attributes = mutableMapOf(
@@ -180,12 +161,12 @@ private class AndroidReplayCaptureManager(
                         "screenName" to currentScreenName(),
                     ),
                 )
-                emitScreenAndFrame(reason = "resume")
+                emitScreenView(reason = "resume")
             }
         }
 
         override fun onActivityPaused(activity: Activity) {
-            if (captureNativeLifecycle && this@AndroidReplayCaptureManager.activity === activity) {
+            if (captureNativeLifecycle && this@AndroidNativeCaptureManager.activity === activity) {
                 emitEvent(
                     type = "native.lifecycle",
                     attributes = mutableMapOf(
@@ -203,29 +184,20 @@ private class AndroidReplayCaptureManager(
 
     fun start(config: Map<String, Any?>) {
         captureNativeLifecycle = config.booleanValue("captureNativeLifecycle", true)
-        captureNativeViewHierarchy = config.booleanValue("captureNativeViewHierarchy", true)
         captureScrolls = config.booleanValue("captureScrolls", true)
         captureTaps = config.booleanValue("captureTaps", true)
-        maskAllText = config.booleanValue("maskAllText", false)
-        maskTextInputs = config.booleanValue("maskTextInputs", true)
         minimumScrollDelta = config.doubleValue("minimumScrollDelta", 24.0)
         scrollEventThrottleMs = config.longValue("scrollEventThrottleMs", 250)
-        snapshotIntervalMs = config.longValue("nativeViewTreeSnapshotIntervalMs", 700)
         isStarted = true
 
         (context.applicationContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCallbacks)
         installOnActivity()
-        handler.removeCallbacks(snapshotRunnable)
-        if (captureNativeViewHierarchy) {
-            handler.post(snapshotRunnable)
-        }
-        emitScreenAndFrame(reason = "start")
+        emitScreenView(reason = "start")
     }
 
     fun stop() {
         isStarted = false
         flutterScreenName = null
-        handler.removeCallbacks(snapshotRunnable)
         uninstallFromActivity()
         (context.applicationContext as? Application)?.unregisterActivityLifecycleCallbacks(lifecycleCallbacks)
     }
@@ -235,7 +207,6 @@ private class AndroidReplayCaptureManager(
             return
         }
 
-        handler.removeCallbacks(snapshotRunnable)
         uninstallFromActivity()
     }
 
@@ -246,16 +217,10 @@ private class AndroidReplayCaptureManager(
         }
 
         captureNativeLifecycle = config.booleanValue("captureNativeLifecycle", captureNativeLifecycle)
-        captureNativeViewHierarchy = config.booleanValue("captureNativeViewHierarchy", captureNativeViewHierarchy)
         captureScrolls = config.booleanValue("captureScrolls", captureScrolls)
         captureTaps = config.booleanValue("captureTaps", captureTaps)
-        snapshotIntervalMs = config.longValue("nativeViewTreeSnapshotIntervalMs", snapshotIntervalMs)
         installOnActivity()
-        handler.removeCallbacks(snapshotRunnable)
-        if (captureNativeViewHierarchy) {
-            handler.post(snapshotRunnable)
-        }
-        emitScreenAndFrame(reason = "resume_capture")
+        emitScreenView(reason = "resume_capture")
     }
 
     fun setScreenName(screenName: String?) {
@@ -267,7 +232,7 @@ private class AndroidReplayCaptureManager(
         this.activity = activity
         if (isStarted) {
             installOnActivity()
-            emitScreenAndFrame(reason = "activity_attached")
+            emitScreenView(reason = "activity_attached")
         }
     }
 
@@ -298,7 +263,7 @@ private class AndroidReplayCaptureManager(
             }
         }
 
-        if (captureScrolls || captureNativeViewHierarchy) {
+        if (captureScrolls) {
             viewTreeObserver = decorView.viewTreeObserver
             scrollListener = ViewTreeObserver.OnScrollChangedListener {
                 if (!captureScrolls) {
@@ -348,7 +313,7 @@ private class AndroidReplayCaptureManager(
         scrollListener = null
     }
 
-    private fun emitScreenAndFrame(reason: String) {
+    private fun emitScreenView(reason: String) {
         val screenName = currentScreenName()
         if (screenName != null && screenName != previousScreenName) {
             previousScreenName = screenName
@@ -364,193 +329,7 @@ private class AndroidReplayCaptureManager(
             )
         }
 
-        if (!captureNativeViewHierarchy) {
-            return
-        }
-
-        val rootTree = buildRootTree() ?: return
-        emitEvent(
-            type = "replay.frame",
-            attributes = mutableMapOf(
-                "screenName" to screenName,
-                "tree" to rootTree,
-                "metadata" to mutableMapOf(
-                    "platform" to "android",
-                    "reason" to reason,
-                    "captureStrategy" to "native_view_hierarchy",
-                ),
-                "viewport" to buildViewport(),
-            ),
-        )
-    }
-
-    private fun buildRootTree(): Map<String, Any?>? {
-        val currentActivity = activity ?: return null
-        val rootView = currentActivity.window?.decorView?.rootView ?: return null
-        return buildNode(rootView)
-    }
-
-    private fun buildNode(view: View): Map<String, Any?> {
-        val location = IntArray(2)
-        view.getLocationOnScreen(location)
-        val bounds = mutableMapOf<String, Any?>(
-            "x" to location[0],
-            "y" to location[1],
-            "width" to view.width,
-            "height" to view.height,
-        )
-
-        val node = mutableMapOf<String, Any?>(
-            "id" to System.identityHashCode(view).toString(),
-            "type" to view.javaClass.simpleName,
-            "alpha" to view.alpha.toDouble(),
-            "bounds" to bounds,
-            "clickable" to view.isClickable,
-            "contentDescription" to view.contentDescription?.toString(),
-            "enabled" to view.isEnabled,
-            "focused" to view.isFocused,
-            "padding" to mutableMapOf(
-                "left" to view.paddingLeft,
-                "top" to view.paddingTop,
-                "right" to view.paddingRight,
-                "bottom" to view.paddingBottom,
-            ),
-            "render" to buildRenderProperties(view),
-            "scrollable" to (view.canScrollVertically(1) || view.canScrollVertically(-1)),
-            "selected" to view.isSelected,
-            "transform" to mutableMapOf(
-                "elevation" to view.elevation.toDouble(),
-                "pivotX" to view.pivotX.toDouble(),
-                "pivotY" to view.pivotY.toDouble(),
-                "rotation" to view.rotation.toDouble(),
-                "rotationX" to view.rotationX.toDouble(),
-                "rotationY" to view.rotationY.toDouble(),
-                "scaleX" to view.scaleX.toDouble(),
-                "scaleY" to view.scaleY.toDouble(),
-                "translationX" to view.translationX.toDouble(),
-                "translationY" to view.translationY.toDouble(),
-            ),
-            "visible" to (view.visibility == View.VISIBLE),
-        )
-
-        if (view is TextView) {
-            val maskTextValue = maskAllText || (maskTextInputs && isInputView(view))
-            node["text"] = if (maskTextValue) "•••" else view.text?.toString()
-            node["hint"] = if (maskTextValue) "•••" else view.hint?.toString()
-            node["textStyle"] = mutableMapOf(
-                "alignment" to gravityToAlignment(view.gravity),
-                "color" to colorIntToHex(view.currentTextColor),
-                "fontSizeSp" to pxToSp(view.textSize),
-                "fontStyle" to if (view.typeface?.isItalic == true) "italic" else "normal",
-                "fontWeight" to if (view.typeface?.isBold == true) "700" else "400",
-                "lineHeightPx" to view.lineHeight.toDouble(),
-                "maxLines" to view.maxLines,
-                "textAlignment" to textAlignmentToString(view.textAlignment),
-            )
-        }
-
-        if (view is EditText) {
-            node["inputType"] = view.inputType
-        }
-
-        if (view is ImageView) {
-            node["image"] = mutableMapOf(
-                "hasDrawable" to (view.drawable != null),
-                "scaleType" to view.scaleType.name,
-                "tintColor" to colorStateListToHex(view.imageTintList),
-            )
-        }
-
-        if (view is CompoundButton) {
-            node["checked"] = view.isChecked
-        }
-
-        if (view is ProgressBar) {
-            node["progress"] = mutableMapOf(
-                "indeterminate" to view.isIndeterminate,
-                "max" to view.max,
-                "progress" to view.progress,
-            )
-        }
-
-        if (view is RatingBar) {
-            node["rating"] = view.rating.toDouble()
-        }
-
-        if (view is ScrollView) {
-            val child = if (view.childCount > 0) view.getChildAt(0) else null
-            node["contentOffset"] = mutableMapOf(
-                "x" to view.scrollX,
-                "y" to view.scrollY,
-            )
-            node["contentSize"] = mutableMapOf(
-                "width" to (child?.width ?: view.width),
-                "height" to (child?.height ?: view.height),
-            )
-        }
-
-        if (view is ViewGroup) {
-            val children = ArrayList<Map<String, Any?>>(view.childCount)
-            for (index in 0 until view.childCount) {
-                val childNode = buildNode(view.getChildAt(index)).toMutableMap()
-                childNode["childIndex"] = index
-                children.add(childNode)
-            }
-            node["children"] = children
-        }
-
-        return node
-    }
-
-    private fun buildViewport(): Map<String, Any?> {
-        val currentActivity = activity ?: return emptyMap()
-        val rootView = currentActivity.window?.decorView?.rootView ?: return emptyMap()
-        val metrics = rootView.resources.displayMetrics
-        return mutableMapOf(
-            "density" to metrics.density.toDouble(),
-            "height" to rootView.height,
-            "statusBarHeight" to systemBarDimension("status_bar_height"),
-            "navigationBarHeight" to systemBarDimension("navigation_bar_height"),
-            "width" to rootView.width,
-        )
-    }
-
-    private fun buildRenderProperties(view: View): Map<String, Any?> {
-        val background = serializeBackground(view.background)
-        return mutableMapOf(
-            "background" to background,
-            "clipChildren" to (view as? ViewGroup)?.clipChildren,
-            "clipToPadding" to (view as? ViewGroup)?.clipToPadding,
-        )
-    }
-
-    private fun serializeBackground(background: android.graphics.drawable.Drawable?): Map<String, Any?>? {
-        background ?: return null
-        return when (background) {
-            is ColorDrawable -> mutableMapOf(
-                "type" to "solid",
-                "color" to colorIntToHex(background.color),
-            )
-
-            is GradientDrawable -> mutableMapOf(
-                "type" to "gradient",
-                "color" to colorIntToHex(background.color?.defaultColor ?: Color.TRANSPARENT),
-                "cornerRadius" to background.cornerRadius.toDouble(),
-                "shape" to gradientShapeToString(background.shape),
-            )
-
-            else -> mutableMapOf(
-                "type" to background.javaClass.simpleName,
-            )
-        }
-    }
-
-    private fun systemBarDimension(name: String): Int {
-        val resourceId = context.resources.getIdentifier(name, "dimen", "android")
-        if (resourceId == 0) {
-            return 0
-        }
-        return context.resources.getDimensionPixelSize(resourceId)
+        return
     }
 
     private fun currentScreenName(): String? {
@@ -576,51 +355,6 @@ private class AndroidReplayCaptureManager(
         }
     }
 
-    private fun isInputView(view: TextView): Boolean {
-        val inputType = view.inputType
-        return inputType and InputType.TYPE_CLASS_TEXT != 0 ||
-            inputType and InputType.TYPE_CLASS_NUMBER != 0 ||
-            inputType and InputType.TYPE_TEXT_VARIATION_PASSWORD != 0
-    }
-
-    private fun pxToSp(px: Float): Double {
-        val metrics = context.resources.displayMetrics
-        return (px / metrics.scaledDensity).toDouble()
-    }
-
-    private fun gravityToAlignment(gravity: Int): String {
-        return when {
-            gravity and Gravity.CENTER_HORIZONTAL == Gravity.CENTER_HORIZONTAL -> "center"
-            gravity and Gravity.END == Gravity.END || gravity and Gravity.RIGHT == Gravity.RIGHT -> "end"
-            else -> "start"
-        }
-    }
-
-    private fun textAlignmentToString(alignment: Int): String {
-        return when (alignment) {
-            View.TEXT_ALIGNMENT_CENTER -> "center"
-            View.TEXT_ALIGNMENT_TEXT_END, View.TEXT_ALIGNMENT_VIEW_END -> "end"
-            View.TEXT_ALIGNMENT_TEXT_START, View.TEXT_ALIGNMENT_VIEW_START -> "start"
-            else -> "inherit"
-        }
-    }
-
-    private fun gradientShapeToString(shape: Int): String {
-        return when (shape) {
-            GradientDrawable.OVAL -> "oval"
-            GradientDrawable.LINE -> "line"
-            GradientDrawable.RING -> "ring"
-            else -> "rectangle"
-        }
-    }
-}
-
-private fun colorIntToHex(color: Int): String {
-    return String.format("#%08X", color)
-}
-
-private fun colorStateListToHex(colorStateList: ColorStateList?): String? {
-    return colorStateList?.defaultColor?.let(::colorIntToHex)
 }
 
 private fun Map<String, Any?>.booleanValue(key: String, fallback: Boolean): Boolean {

@@ -13,9 +13,13 @@ abstract class SessionRecorderNativeBridge {
 
   Future<void> startCapture(SessionRecorderConfig config);
 
+  Future<void> startSnapshotCapture(SessionRecorderConfig config);
+
   Future<void> pauseCapture();
 
   Future<void> resumeCapture(SessionRecorderConfig config);
+
+  Future<void> stopSnapshotCapture();
 
   Future<void> stopCapture();
 }
@@ -75,6 +79,14 @@ class MethodChannelSessionRecorderNativeBridge
   }
 
   @override
+  Future<void> startSnapshotCapture(SessionRecorderConfig config) async {
+    await _methodChannel.invokeMethod<void>(
+      'startSnapshotCapture',
+      config.toJson(),
+    );
+  }
+
+  @override
   Future<void> pauseCapture() async {
     await _methodChannel.invokeMethod<void>('pauseCapture');
   }
@@ -82,6 +94,11 @@ class MethodChannelSessionRecorderNativeBridge
   @override
   Future<void> resumeCapture(SessionRecorderConfig config) async {
     await _methodChannel.invokeMethod<void>('resumeCapture', config.toJson());
+  }
+
+  @override
+  Future<void> stopSnapshotCapture() async {
+    await _methodChannel.invokeMethod<void>('stopSnapshotCapture');
   }
 
   @override

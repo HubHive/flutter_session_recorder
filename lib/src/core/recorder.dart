@@ -34,6 +34,7 @@ class Recorder with widgets.WidgetsBindingObserver {
   ui.PlatformDispatcher? _platformDispatcher;
   ui.ErrorCallback? _previousPlatformErrorHandler;
   bool _isLifecycleObserverRegistered = false;
+  bool _isNativeSnapshotStartScheduled = false;
 
   SessionRecorder get engine => _sessionRecorder;
 
@@ -47,6 +48,26 @@ class Recorder with widgets.WidgetsBindingObserver {
   ReplayDocument? get replayDocument => _sessionRecorder.buildReplayDocument();
 
   Future<void> initialize({
+    SessionRecorderConfig config = const SessionRecorderConfig.lightweight(),
+    SessionRecorderNativeBridge? nativeBridge,
+    SessionRecorderTransport transport = const NoopSessionRecorderTransport(),
+    Map<String, Object?> sessionProperties = const <String, Object?>{},
+    String? userId,
+    Map<String, Object?> userProperties = const <String, Object?>{},
+  }) {
+    return _initialize(
+      config: config,
+      nativeBridge: nativeBridge,
+      transport: transport,
+      sessionProperties: sessionProperties,
+      userId: userId,
+      userProperties: userProperties,
+      scheduleNativeSnapshotStart: true,
+    );
+  }
+
+  Future<void> _initialize({
+    required bool scheduleNativeSnapshotStart,
     SessionRecorderConfig config = const SessionRecorderConfig.lightweight(),
     SessionRecorderNativeBridge? nativeBridge,
     SessionRecorderTransport transport = const NoopSessionRecorderTransport(),
@@ -67,9 +88,13 @@ class Recorder with widgets.WidgetsBindingObserver {
     _syncLogCapture(config);
     await _sessionRecorder.start(
       sessionProperties: sessionProperties,
+      startNativeSnapshots: false,
       userId: userId,
       userProperties: userProperties,
     );
+    if (scheduleNativeSnapshotStart) {
+      _scheduleNativeSnapshotStartAfterFirstFrame();
+    }
     await _applyPendingUserAssignmentIfNeeded();
     _flushPendingActions();
   }
@@ -82,9 +107,11 @@ class Recorder with widgets.WidgetsBindingObserver {
     _syncLogCapture(_sessionRecorder.config);
     await _sessionRecorder.start(
       sessionProperties: sessionProperties,
+      startNativeSnapshots: false,
       userId: userId,
       userProperties: userProperties,
     );
+    _scheduleNativeSnapshotStartAfterFirstFrame();
     await _applyPendingUserAssignmentIfNeeded();
     _flushPendingActions();
   }
@@ -107,6 +134,14 @@ class Recorder with widgets.WidgetsBindingObserver {
     return _sessionRecorder.resumeCapture(reason: reason);
   }
 
+  Future<void> startSnapshotCapture() {
+    return _sessionRecorder.startSnapshotCapture();
+  }
+
+  Future<void> stopSnapshotCapture() {
+    return _sessionRecorder.stopSnapshotCapture();
+  }
+
   Future<void> flush() {
     return _sessionRecorder.flush();
   }
@@ -122,13 +157,14 @@ class Recorder with widgets.WidgetsBindingObserver {
   }) async {
     widgets.WidgetsFlutterBinding.ensureInitialized();
     if (!_sessionRecorder.isRecording) {
-      await initialize(
+      await _initialize(
         config: config,
         nativeBridge: nativeBridge,
         transport: transport,
         sessionProperties: sessionProperties,
         userId: userId,
         userProperties: userProperties,
+        scheduleNativeSnapshotStart: false,
       );
     } else {
       _syncLifecycleObserver(_sessionRecorder.config);
@@ -139,6 +175,7 @@ class Recorder with widgets.WidgetsBindingObserver {
 
     try {
       widgets.runApp(instrumentedApp);
+      _scheduleNativeSnapshotStartAfterFirstFrame();
     } catch (error, stackTrace) {
       this.error(
         error,
@@ -156,6 +193,28 @@ class Recorder with widgets.WidgetsBindingObserver {
       );
       rethrow;
     }
+  }
+
+  void _scheduleNativeSnapshotStartAfterFirstFrame() {
+    if (_isNativeSnapshotStartScheduled) {
+      return;
+    }
+
+    _isNativeSnapshotStartScheduled = true;
+    widgets.WidgetsBinding.instance.addPostFrameCallback((_) {
+      _isNativeSnapshotStartScheduled = false;
+      if (!_sessionRecorder.isRecording ||
+          _sessionRecorder.isCapturePaused ||
+          _sessionRecorder.isRecordingAccessDenied) {
+        return;
+      }
+      debugPrint(
+        '[flutter_session_recorder] Starting native visual capture after '
+        'the first Flutter frame',
+      );
+      unawaited(_sessionRecorder.startSnapshotCapture());
+    });
+    widgets.WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   widgets.Widget _wrapRootApp(widgets.Widget app) {

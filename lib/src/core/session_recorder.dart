@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
@@ -6,9 +7,9 @@ import 'recorder_event.dart';
 import 'replay_document.dart';
 import 'session_batch.dart';
 import 'session_recorder_config.dart';
-import 'session_keyframe.dart';
 import 'session_recorder_native_bridge.dart';
 import 'session_recorder_transport.dart';
+import 'session_snapshot.dart';
 
 typedef ScreenViewListener = void Function(
   String screenName,
@@ -36,19 +37,27 @@ class SessionRecorder {
   final SessionRecorderTransport transport;
 
   final List<RecorderEvent> _buffer = <RecorderEvent>[];
+  final List<SessionSnapshotUpload> _pendingSnapshotUploads =
+      <SessionSnapshotUpload>[];
   final List<RecorderEvent> _sessionHistory = <RecorderEvent>[];
   final List<CaptureStateListener> _captureStateListeners =
       <CaptureStateListener>[];
   final List<ScreenViewListener> _screenViewListeners = <ScreenViewListener>[];
 
   Timer? _flushTimer;
+  Timer? _nativeSnapshotFirstSignalTimer;
   Timer? _recordingAccessCheckTimer;
+  Timer? _snapshotUploadTimer;
   StreamSubscription<Map<String, Object?>>? _nativeEventSubscription;
   DateTime? _pausedAt;
   bool _isCheckingRecordingAccess = false;
   bool _isRecordingAccessDenied = false;
   bool _isCapturePaused = false;
   bool _isFlushing = false;
+  bool _isUploadingSnapshots = false;
+  bool _nativeSnapshotCaptureRequested = false;
+  int _pendingSnapshotUploadBytes = 0;
+  Future<void>? _snapshotUploadInFlight;
   String? _sessionId;
   Map<String, Object?> _sessionContext = <String, Object?>{};
   Map<String, Object?> _sessionProperties = <String, Object?>{};
@@ -112,6 +121,7 @@ class SessionRecorder {
 
   Future<void> start({
     Map<String, Object?> sessionProperties = const <String, Object?>{},
+    bool startNativeSnapshots = true,
     String? userId,
     Map<String, Object?> userProperties = const <String, Object?>{},
   }) async {
@@ -125,8 +135,12 @@ class SessionRecorder {
     _userProperties = Map<String, Object?>.from(userProperties);
     _sessionContext = await _collectSessionContext();
     _sessionProperties = Map<String, Object?>.from(sessionProperties);
+    _nativeSnapshotCaptureRequested = true;
 
     await _startNativeCapture();
+    if (_nativeSnapshotCaptureRequested && startNativeSnapshots) {
+      await _startNativeSnapshotCapture();
+    }
     _startFlushTimer();
 
     _enqueue(
@@ -153,9 +167,13 @@ class SessionRecorder {
 
     _flushTimer?.cancel();
     _flushTimer = null;
+    _nativeSnapshotFirstSignalTimer?.cancel();
+    _nativeSnapshotFirstSignalTimer = null;
     _recordingAccessCheckTimer?.cancel();
     _recordingAccessCheckTimer = null;
     await _stopNativeCapture();
+    await _flushSnapshotUploads();
+    _nativeSnapshotCaptureRequested = false;
 
     _enqueue(
       RecorderEvent(
@@ -172,6 +190,7 @@ class SessionRecorder {
       await flush();
     } finally {
       _buffer.clear();
+      _clearPendingSnapshotUploads();
       _sessionHistory.clear();
       _pausedAt = null;
       _sessionId = null;
@@ -286,6 +305,10 @@ class SessionRecorder {
     _pausedAt = _now().toUtc();
     _flushTimer?.cancel();
     _flushTimer = null;
+    if (_nativeSnapshotCaptureRequested) {
+      await _stopNativeSnapshotCapture();
+    }
+    await _flushSnapshotUploads();
 
     _enqueue(
       RecorderEvent(
@@ -353,6 +376,19 @@ class SessionRecorder {
       ),
       allowWhilePaused: true,
     );
+  }
+
+  Future<void> startSnapshotCapture() async {
+    _nativeSnapshotCaptureRequested = true;
+    if (!isRecording || _isCapturePaused || _isRecordingAccessDenied) {
+      return;
+    }
+    await _startNativeSnapshotCapture();
+  }
+
+  Future<void> stopSnapshotCapture() async {
+    _nativeSnapshotCaptureRequested = false;
+    await _stopNativeSnapshotCapture();
   }
 
   void setUserProperties(Map<String, Object?> properties) {
@@ -514,96 +550,206 @@ class SessionRecorder {
     );
   }
 
-  void trackSnapshot({
-    required String imageBase64,
+  Future<void> trackNativeSnapshot({
+    required String filePath,
+    required String snapshotId,
+    required DateTime timestamp,
     required int width,
     required int height,
-    String format = 'png',
-    Map<String, Object?> metadata = const <String, Object?>{},
+    required String format,
+    required String contentType,
     String? screenName,
-  }) {
-    _enqueue(
-      RecorderEvent(
-        type: 'replay.snapshot',
-        attributes: <String, Object?>{
-          'format': format,
-          'height': height,
-          'image': imageBase64,
-          'metadata': metadata,
-          'screenName': screenName,
-          'width': width,
-        },
-      ),
-    );
-  }
-
-  Future<void> trackKeyframe({
-    required List<int> bytes,
-    String format = 'png',
     Map<String, Object?> metadata = const <String, Object?>{},
-    required String reason,
-    String? screenName,
-    required Map<String, Object?> viewport,
   }) async {
     final String? activeSessionId = _sessionId;
     if (activeSessionId == null ||
         _isCapturePaused ||
         _isRecordingAccessDenied) {
+      await _deleteFileQuietly(File(filePath));
       return;
     }
 
-    final DateTime timestamp = _now().toUtc();
-    final SessionKeyframeUpload upload = SessionKeyframeUpload(
+    final File file = File(filePath);
+    if (!await file.exists()) {
+      return;
+    }
+
+    final List<int> bytes = await file.readAsBytes();
+    if (bytes.isEmpty) {
+      await _deleteFileQuietly(file);
+      return;
+    }
+    await _deleteFileQuietly(file);
+
+    final Map<String, Object?> sessionContext =
+        Map<String, Object?>.from(_sessionContext);
+    final Map<String, Object?> sessionProperties =
+        Map<String, Object?>.from(_sessionProperties);
+    final String? userId = _userId;
+    final Map<String, Object?> userProperties =
+        Map<String, Object?>.from(_userProperties);
+
+    final SessionSnapshotUpload upload = SessionSnapshotUpload(
       bytes: bytes,
+      contentType: contentType,
+      filename: '$snapshotId.$format',
       format: format,
+      height: height,
       metadata: metadata,
-      reason: reason,
       screenName: screenName,
+      sessionContext: sessionContext,
       sessionId: activeSessionId,
+      sessionProperties: sessionProperties,
+      snapshotId: snapshotId,
       timestamp: timestamp,
-      viewport: viewport,
+      userId: userId,
+      userProperties: userProperties,
+      width: width,
     );
-    late final UploadedKeyframe uploadedKeyframe;
-    try {
-      uploadedKeyframe = await transport.uploadKeyframe(upload);
-    } catch (error, stackTrace) {
-      if (await _handleTransportError(error)) {
+
+    _queueSnapshotUpload(upload);
+  }
+
+  void _queueSnapshotUpload(SessionSnapshotUpload upload) {
+    if (!isRecording || _isCapturePaused || _isRecordingAccessDenied) {
+      return;
+    }
+
+    _pendingSnapshotUploads.add(upload);
+    _pendingSnapshotUploadBytes += upload.bytes.length;
+
+    final int maxBatchSize = config.maxSnapshotUploadBatchSize;
+    final int maxBatchBytes = config.maxSnapshotUploadBatchBytes;
+    if ((maxBatchSize > 0 && _pendingSnapshotUploads.length >= maxBatchSize) ||
+        (maxBatchBytes > 0 && _pendingSnapshotUploadBytes >= maxBatchBytes)) {
+      unawaited(_flushSnapshotUploads());
+      return;
+    }
+
+    _startSnapshotUploadTimer();
+  }
+
+  void _startSnapshotUploadTimer() {
+    if (_snapshotUploadTimer != null ||
+        _pendingSnapshotUploads.isEmpty ||
+        _isRecordingAccessDenied) {
+      return;
+    }
+
+    _snapshotUploadTimer = Timer(config.snapshotUploadFlushInterval, () {
+      _snapshotUploadTimer = null;
+      unawaited(_flushSnapshotUploads());
+    });
+  }
+
+  Future<void> _flushSnapshotUploads() async {
+    if (_isUploadingSnapshots) {
+      await _snapshotUploadInFlight;
+      if (_isRecordingAccessDenied || _pendingSnapshotUploads.isEmpty) {
         return;
       }
+    }
+    if (_isRecordingAccessDenied || _pendingSnapshotUploads.isEmpty) {
+      return;
+    }
+
+    _snapshotUploadTimer?.cancel();
+    _snapshotUploadTimer = null;
+
+    final List<SessionSnapshotUpload> uploads =
+        List<SessionSnapshotUpload>.from(_pendingSnapshotUploads);
+    _pendingSnapshotUploads.clear();
+    _pendingSnapshotUploadBytes = 0;
+    _isUploadingSnapshots = true;
+    final Future<void> inFlight = _uploadSnapshotBatch(uploads);
+    _snapshotUploadInFlight = inFlight;
+    try {
+      await inFlight;
+    } finally {
+      if (identical(_snapshotUploadInFlight, inFlight)) {
+        _snapshotUploadInFlight = null;
+      }
+      _isUploadingSnapshots = false;
+    }
+
+    if (_pendingSnapshotUploads.isNotEmpty) {
+      _startSnapshotUploadTimer();
+    }
+  }
+
+  Future<void> _uploadSnapshotBatch(
+    List<SessionSnapshotUpload> uploads,
+  ) async {
+    late final List<UploadedSnapshot> uploadedSnapshots;
+    try {
+      uploadedSnapshots = await transport.uploadSnapshots(uploads);
+    } catch (error, stackTrace) {
+      if (await _handleTransportError(error)) {
+        _clearPendingSnapshotUploads();
+        return;
+      }
+
+      _pendingSnapshotUploads.insertAll(0, uploads);
+      _pendingSnapshotUploadBytes += uploads.fold<int>(
+        0,
+        (int total, SessionSnapshotUpload upload) =>
+            total + upload.bytes.length,
+      );
+      _startSnapshotUploadTimer();
       FlutterError.reportError(
         FlutterErrorDetails(
           exception: error,
           stack: stackTrace,
           library: 'flutter_session_recorder',
-          context: ErrorDescription('while uploading a keyframe'),
+          context: ErrorDescription('while uploading a snapshot batch'),
         ),
       );
-      rethrow;
-    }
-
-    if (_sessionId != activeSessionId ||
-        _isCapturePaused ||
-        _isRecordingAccessDenied) {
       return;
     }
 
-    _enqueue(
-      RecorderEvent(
-        type: 'replay.keyframe',
-        timestamp: timestamp,
-        attributes: <String, Object?>{
-          'format': format,
-          'frameRef': uploadedKeyframe.frameRef,
-          'metadata': metadata,
-          'reason': reason,
-          'screenName': screenName,
-          'viewport': viewport,
-        },
-      ),
-    );
+    for (int index = 0; index < uploads.length; index += 1) {
+      final SessionSnapshotUpload upload = uploads[index];
+      final UploadedSnapshot uploadedSnapshot = index < uploadedSnapshots.length
+          ? uploadedSnapshots[index]
+          : UploadedSnapshot(snapshotRef: upload.snapshotId);
+      if (_sessionId != upload.sessionId ||
+          _isCapturePaused ||
+          _isRecordingAccessDenied) {
+        continue;
+      }
+
+      _enqueue(
+        RecorderEvent(
+          type: 'replay.snapshot',
+          timestamp: upload.timestamp,
+          attributes: <String, Object?>{
+            'format': upload.format,
+            'height': upload.height,
+            'metadata': upload.metadata,
+            'screenName': upload.screenName,
+            'sessionContext': upload.sessionContext,
+            'sessionProperties': upload.sessionProperties,
+            'snapshotId': upload.snapshotId,
+            'snapshotRef': uploadedSnapshot.snapshotRef,
+            'userId': upload.userId,
+            'userProperties': upload.userProperties,
+            'width': upload.width,
+          },
+        ),
+      );
+    }
+  }
+
+  void _clearPendingSnapshotUploads() {
+    _snapshotUploadTimer?.cancel();
+    _snapshotUploadTimer = null;
+    _pendingSnapshotUploads.clear();
+    _pendingSnapshotUploadBytes = 0;
   }
 
   Future<void> flush() async {
+    await _flushSnapshotUploads();
+
     final String? sessionId = _sessionId;
     final DateTime? startedAt = _startedAt;
     if (_isFlushing ||
@@ -704,6 +850,10 @@ class SessionRecorder {
   }) async {
     _flushTimer?.cancel();
     _flushTimer = null;
+    if (_nativeSnapshotCaptureRequested) {
+      await _stopNativeSnapshotCapture();
+    }
+    await _flushSnapshotUploads();
 
     _enqueue(
       RecorderEvent(
@@ -776,6 +926,7 @@ class SessionRecorder {
     _pausedAt = _now().toUtc();
     _flushTimer?.cancel();
     _flushTimer = null;
+    _clearPendingSnapshotUploads();
     _buffer.clear();
     _sessionHistory.clear();
     _notifyCaptureStateListeners(isPaused: true);
@@ -830,6 +981,7 @@ class SessionRecorder {
     _recordingAccessCheckTimer?.cancel();
     _recordingAccessCheckTimer = null;
     _buffer.clear();
+    _clearPendingSnapshotUploads();
     _sessionHistory.clear();
     _sessionId = _idGenerator();
     _startedAt = resumedAt;
@@ -877,9 +1029,12 @@ class SessionRecorder {
   Future<Map<String, Object?>> _collectSessionContext() async {
     final Map<String, Object?> deviceContext =
         await _safeCollectDeviceContext();
+    final String? recordingDomain = config.recordingDomain?.trim();
 
     return <String, Object?>{
       if (deviceContext.isNotEmpty) 'device': deviceContext,
+      if (recordingDomain != null && recordingDomain.isNotEmpty)
+        'recordingDomain': recordingDomain,
     };
   }
 
@@ -923,6 +1078,7 @@ class SessionRecorder {
   }
 
   Future<void> _stopNativeCapture() async {
+    await _stopNativeSnapshotCapture();
     try {
       await _nativeBridge.stopCapture();
     } catch (error, stackTrace) {
@@ -942,6 +1098,7 @@ class SessionRecorder {
   }
 
   Future<void> _pauseNativeCapture() async {
+    await _stopNativeSnapshotCapture();
     try {
       await _nativeBridge.pauseCapture();
     } catch (error, stackTrace) {
@@ -964,6 +1121,9 @@ class SessionRecorder {
 
     try {
       await _nativeBridge.resumeCapture(config);
+      if (_nativeSnapshotCaptureRequested) {
+        await _startNativeSnapshotCapture();
+      }
     } catch (error, stackTrace) {
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -981,11 +1141,55 @@ class SessionRecorder {
     if (type == null || type.isEmpty) {
       return;
     }
-
     final Map<String, Object?> attributes = Map<String, Object?>.from(
       (event['attributes'] as Map<Object?, Object?>?) ?? <Object?, Object?>{},
     );
     final int? timestampMs = event['timestampMs'] as int?;
+    if (type == 'replay.snapshot.ready') {
+      _nativeSnapshotFirstSignalTimer?.cancel();
+      _nativeSnapshotFirstSignalTimer = null;
+      debugPrint(
+        '[flutter_session_recorder] Native snapshot is ready for upload',
+      );
+      unawaited(_handleNativeSnapshot(attributes, timestampMs));
+      return;
+    }
+    if (type == 'native.snapshot_capture.error') {
+      _nativeSnapshotFirstSignalTimer?.cancel();
+      _nativeSnapshotFirstSignalTimer = null;
+      debugPrint(
+        '[flutter_session_recorder] Native visual capture error: '
+        '${attributes['message']}',
+      );
+      trackError(
+        error: attributes['message'] ?? 'Native visual capture error',
+        logger: 'native_snapshot_capture',
+        properties: attributes,
+      );
+      return;
+    }
+    if (type == 'native.snapshot_capture.status') {
+      final String? phase = attributes['phase']?.toString();
+      if (phase != 'started') {
+        _nativeSnapshotFirstSignalTimer?.cancel();
+        _nativeSnapshotFirstSignalTimer = null;
+      }
+      debugPrint(
+        '[flutter_session_recorder] Native visual capture status: '
+        '${phase ?? 'unknown'} - ${attributes['message']}',
+      );
+      trackLog(
+        level: attributes['level']?.toString() ?? 'info',
+        logger: 'native_snapshot_capture',
+        message: attributes['message']?.toString() ??
+            'Native visual capture status changed',
+        properties: attributes,
+      );
+      return;
+    }
+    if (!_isSupportedNativeEventType(type)) {
+      return;
+    }
 
     _enqueue(
       RecorderEvent(
@@ -1000,5 +1204,152 @@ class SessionRecorder {
         attributes: attributes,
       ),
     );
+  }
+
+  bool _isSupportedNativeEventType(String type) {
+    return type == 'screen.view' ||
+        type == 'interaction.tap' ||
+        type == 'interaction.scroll' ||
+        type == 'native.lifecycle';
+  }
+
+  Future<void> _handleNativeSnapshot(
+    Map<String, Object?> attributes,
+    int? fallbackTimestampMs,
+  ) async {
+    final String? filePath = attributes['filePath'] as String?;
+    final String? snapshotId = attributes['snapshotId'] as String?;
+    if (filePath == null ||
+        filePath.isEmpty ||
+        snapshotId == null ||
+        snapshotId.isEmpty) {
+      return;
+    }
+
+    final Object? timestampValue = attributes['timestampMs'];
+    final int? nativeTimestampMs = timestampValue is int
+        ? timestampValue
+        : int.tryParse(timestampValue?.toString() ?? '');
+    final int timestampMs = nativeTimestampMs ??
+        fallbackTimestampMs ??
+        _now().millisecondsSinceEpoch;
+
+    await trackNativeSnapshot(
+      filePath: filePath,
+      snapshotId: snapshotId,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(
+        timestampMs,
+        isUtc: true,
+      ),
+      width: _intAttribute(attributes, 'width'),
+      height: _intAttribute(attributes, 'height'),
+      format: (attributes['format'] as String?) ?? 'jpg',
+      contentType: (attributes['contentType'] as String?) ?? 'image/jpeg',
+      screenName: attributes['screenName'] as String?,
+      metadata: <String, Object?>{
+        'captureStrategy':
+            attributes['captureStrategy']?.toString() ?? 'native_snapshot',
+        'fileSize': attributes['fileSize'],
+        'platform': 'ios',
+        'sequence': attributes['sequence'],
+      },
+    );
+  }
+
+  Future<void> _startNativeSnapshotCapture() async {
+    try {
+      debugPrint(
+        '[flutter_session_recorder] Starting native visual capture '
+        '(${defaultTargetPlatform.name}, '
+        '${config.nativeSnapshotInterval.inMilliseconds}ms snapshots)',
+      );
+      _startNativeSnapshotFirstSignalTimer();
+      await _nativeBridge.startSnapshotCapture(config);
+      debugPrint(
+        '[flutter_session_recorder] Native visual capture start completed',
+      );
+      trackLog(
+        logger: 'native_snapshot_capture',
+        message: 'Native visual capture start completed',
+        properties: <String, Object?>{
+          'maxDimension': config.nativeSnapshotMaxDimension,
+          'platform': defaultTargetPlatform.name,
+          'snapshotIntervalMs': config.nativeSnapshotInterval.inMilliseconds,
+        },
+      );
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[flutter_session_recorder] Native visual capture failed to start: '
+        '$error',
+      );
+      trackError(
+        error: error,
+        stackTrace: stackTrace,
+        logger: 'native_snapshot_capture',
+        message: 'Native visual capture failed to start',
+        properties: <String, Object?>{
+          'phase': 'start',
+          'platform': defaultTargetPlatform.name,
+        },
+      );
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'flutter_session_recorder',
+          context: ErrorDescription('while starting native visual capture'),
+        ),
+      );
+    }
+  }
+
+  void _startNativeSnapshotFirstSignalTimer() {
+    _nativeSnapshotFirstSignalTimer?.cancel();
+    _nativeSnapshotFirstSignalTimer = Timer(const Duration(seconds: 2), () {
+      if (!isRecording || _isCapturePaused || _isRecordingAccessDenied) {
+        return;
+      }
+      debugPrint(
+        '[flutter_session_recorder] Native visual capture started, but no '
+        'snapshot events have been received yet. If this persists, '
+        'the native visual capture path is not producing snapshots.',
+      );
+    });
+  }
+
+  Future<void> _stopNativeSnapshotCapture() async {
+    _nativeSnapshotFirstSignalTimer?.cancel();
+    _nativeSnapshotFirstSignalTimer = null;
+    try {
+      await _nativeBridge.stopSnapshotCapture();
+    } catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'flutter_session_recorder',
+          context: ErrorDescription('while stopping native visual capture'),
+        ),
+      );
+    }
+  }
+
+  int _intAttribute(Map<String, Object?> attributes, String key) {
+    final Object? value = attributes[key];
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.round();
+    }
+    return int.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  Future<void> _deleteFileQuietly(File file) async {
+    try {
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {}
   }
 }

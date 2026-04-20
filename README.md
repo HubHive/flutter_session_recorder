@@ -1,44 +1,42 @@
 # flutter_session_recorder
 
-A Flutter session replay SDK built around a hybrid capture model:
+A Flutter session replay SDK built around a single visual mode: native visual snapshots plus structured metadata.
 
 - one global Dart entrypoint through `recorder`
-- structured interaction, screen, log, error, and native replay events
-- Flutter root keyframes uploaded as separate frame assets
+- native snapshots uploaded to `/snapshots`
+- structured screen, tap, scroll, lifecycle, log, error, and custom events
 - session/user APIs that do not require passing recorder instances around
+- no schematic reconstruction, screen-recording prompts, or replay asset uploads
 
 ## Architecture
 
-For Flutter apps, the primary visual truth source is a hybrid keyframe pipeline:
-
-- Flutter root keyframes are captured from a single recorder-owned boundary
-- keyframes are uploaded separately from event batches
-- event batches only carry `replay.keyframe` metadata plus the `frameRef`
-- structured events still drive the replay timeline between keyframes
+The visual truth source is native snapshot capture. The SDK uploads compressed visual keyframes separately from JSON session batches. The event timeline stores `replay.snapshot` references plus metadata, then overlays structured events during playback.
 
 Structured events include:
 
 - `screen.view`
 - `interaction.tap`
 - `interaction.scroll`
-- `replay.frame` for native view-tree metadata when enabled
+- `native.lifecycle`
+- `replay.snapshot`
 - `log`
 - `error`
 - `custom`
 
-This lets a viewer render the latest uploaded keyframe and overlay touches, scrolls, logs, errors, and custom events until the next keyframe arrives.
+The viewer should show the latest snapshot as the primary visual layer until the next snapshot arrives, then overlay taps, scroll markers, logs, errors, custom events, and screen transitions on top.
 
 ## Quick start
 
-Initialize once:
-
 ```dart
-await recorder.initialize(
+await recorder.runApp(
+  const MyApp(),
   config: const SessionRecorderConfig.lightweight(
-    captureHybridKeyframes: true,
-    hybridKeyframeInterval: Duration(seconds: 3),
-    captureNativeViewHierarchy: true,
-    nativeViewTreeSnapshotInterval: Duration(milliseconds: 700),
+    nativeSnapshotInterval: Duration(milliseconds: 500),
+    nativeSnapshotJpegQuality: 0.65,
+    nativeSnapshotMaxDimension: 720,
+    maxSnapshotUploadBatchSize: 10,
+    snapshotUploadFlushInterval: Duration(seconds: 5),
+    recordingDomain: 'your-app.example.com',
   ),
   transport: HttpSessionRecorderTransport(
     endpoint: Uri.parse('https://your-recorder.example.com'),
@@ -48,7 +46,7 @@ await recorder.initialize(
 );
 ```
 
-Hook into the app once:
+Hook navigation once if you use `MaterialApp` routes:
 
 ```dart
 MaterialApp(
@@ -57,58 +55,36 @@ MaterialApp(
 );
 ```
 
-You can also let the recorder bootstrap the app root directly:
+`recorder.runApp(...)` wraps the app with metadata capture automatically. It records screen views, taps, scrolls, logs, Flutter errors, platform errors, and explicit `recorder.log(...)` calls. Raw `print()` interception should be handled by an app-owned zone before binding initialization if you need it.
 
-```dart
-await recorder.runApp(
-  const MyApp(),
-  transport: HttpSessionRecorderTransport(
-    endpoint: Uri.parse('https://your-recorder.example.com'),
-  ),
-);
-```
+## Snapshot Uploads
 
-`recorder.runApp(...)` calls Flutter's `runApp(...)` in the current zone so it stays compatible with apps that call `WidgetsFlutterBinding.ensureInitialized()` during bootstrap. The recorder captures `debugPrint`, Flutter errors, platform errors, and explicit `recorder.log(...)` calls. Raw `print()` interception should be handled by an app-owned zone before binding initialization if you need it.
+Native snapshot capture is the only visual mode. On iOS this snapshots the visible key `UIWindow` with `drawHierarchy(in:afterScreenUpdates:)`, falls back to `layer.render(in:)` when needed, uploads compressed JPEG snapshots to `/snapshots`, and then sends lightweight `replay.snapshot` timeline events that reference the uploaded snapshot. This avoids user permission prompts and avoids continuous media encoding on-device.
 
-## Keyframes
+Snapshots are batched before upload to reduce server request volume. By default the SDK uploads up to 10 snapshots per `/snapshots` request, or flushes the pending snapshot batch every 5 seconds. A public `recorder.flush()` also flushes pending snapshots before sending the JSON event batch.
 
-Hybrid keyframes are enabled by default in `SessionRecorderConfig.lightweight()` and are captured on:
+For one-snapshot uploads, the server should accept multipart `POST /snapshots` with file field `snapshot` and return a JSON `snapshotRef` or `id`. For batched uploads, the SDK sends:
 
-- screen view
-- tap
-- throttled scroll updates during active scrolling
-- scroll end
-- app resume
-- a fallback interval, default `3s`
-- a faster adaptive burst during motion, default `150ms` for `2s`
+- multipart files named `snapshot_0`, `snapshot_1`, etc.
+- a `snapshots` JSON manifest field that includes each snapshot's metadata and matching `fileField`
 
-Relevant config:
+The server should return either `{"snapshots":[{"snapshotId":"...","snapshotRef":"..."}]}` or `{"snapshotRefs":{"snapshot-id":"snapshot-ref"}}`. The session batch then contains `replay.snapshot` events with:
 
-```dart
-const SessionRecorderConfig.lightweight(
-  captureHybridKeyframes: true,
-  captureAdaptiveHybridKeyframes: true,
-  captureKeyframesDuringScroll: true,
-  captureKeyframeOnScreenView: true,
-  captureKeyframeOnTap: true,
-  captureKeyframeOnScrollEnd: true,
-  captureKeyframeOnResume: true,
-  activeHybridKeyframeInterval: Duration(milliseconds: 150),
-  activeHybridKeyframeWindow: Duration(seconds: 2),
-  hybridKeyframeInterval: Duration(seconds: 3),
-  hybridKeyframeMaxDimension: 720,
-  scrollKeyframeThrottle: Duration(milliseconds: 175),
-  dedupeIdenticalKeyframes: true,
-)
-```
-
-Each uploaded keyframe produces a `replay.keyframe` event with:
-
-- `frameRef`
-- `reason`
+- `snapshotRef`
+- `snapshotId`
+- `format`
+- `width`
+- `height`
 - `screenName`
-- `viewport`
 - `metadata`
+- `sessionContext`
+- `sessionProperties`
+- `userId`
+- `userProperties`
+
+The same session and user metadata is also included on the multipart `/snapshots` upload so the server can associate snapshot blobs without waiting for or joining against a later `/sessions` batch.
+
+Android native visual capture is currently a no-op while the iOS path is validated.
 
 ## Identity
 
@@ -135,7 +111,7 @@ await recorder.clearUser();
 
 If the active user changes from one identified user to another, the recorder starts a new session automatically.
 
-## Custom data and diagnostics
+## Custom Data And Diagnostics
 
 Record custom events from any file:
 
@@ -161,7 +137,7 @@ recorder.error(
 );
 ```
 
-## Replay documents
+## Replay Documents
 
 The current session can be assembled into a replay document:
 
@@ -171,25 +147,25 @@ final ReplayDocument? replay = recorder.replayDocument;
 
 `ReplayDocument` includes:
 
-- `frames`
-- `keyframes`
+- `snapshots`
 - `screenViews`
 - `interactions`
 - `logs`
 - `errors`
 - `customEvents`
 
-## Session context
+## Session Context
 
 Each session batch carries `sessionContext` with best-effort device metadata, including:
 
 - device type
 - device model
 - OS name and version
+- recording domain
 
-The SDK intentionally does not collect or send IP addresses. Capture client IP on your ingestion server from the incoming request, since that is the reliable place to record the IP seen by your backend.
+Set `recordingDomain` in `SessionRecorderConfig.lightweight(...)` so the server can build its `RequestContext.RecordingDomain` from the session metadata. The SDK intentionally does not collect or send IP addresses or User-Agent values. Capture those on your ingestion server from the incoming request, since that is the reliable place to record the client IP and request User-Agent seen by your backend.
 
-## Background behavior
+## Background Behavior
 
 By default the recorder pauses when the app backgrounds and resumes when it returns:
 
@@ -200,37 +176,29 @@ const SessionRecorderConfig.lightweight(
 )
 ```
 
-- short background gap: same session resumes
-- long background gap: old session closes and a new one starts on resume
+If the app resumes before `backgroundSessionTimeout`, the same session continues. If it resumes after the timeout, the old session is stopped and a new session starts.
 
-## Recording access control
+## Recording Access Control
 
-If the server returns `403 Forbidden` from either `/sessions` or `/frames`, the recorder immediately enters access-denied mode:
+If the server returns `403 Forbidden` from `/sessions` or `/snapshots`, the recorder immediately enters access-denied mode:
 
-- native and Flutter keyframe capture are paused
+- native capture is paused
 - buffered recording data is dropped
-- normal uploads to `/sessions` and `/frames` stop
+- normal uploads to `/sessions` and `/snapshots` stop
 - the SDK only probes `/recording-access-test`
 
 When `/recording-access-test` returns `200 OK`, capture resumes automatically. A `403` from the access test keeps recording disabled.
 
-The default probe interval is 30 seconds:
+## Transport Contract
 
-```dart
-const SessionRecorderConfig.lightweight(
-  recordingAccessCheckInterval: Duration(seconds: 30),
-)
-```
-
-## Transport contract
-
-`SessionRecorderTransport` supports two independent delivery paths:
+`SessionRecorderTransport` supports three delivery paths:
 
 - `send(SessionBatch batch)` for JSON event batches
-- `uploadKeyframe(SessionKeyframeUpload upload)` for binary frame uploads
+- `uploadSnapshots(List<SessionSnapshotUpload> uploads)` for batched native visual snapshots
+- `uploadSnapshot(SessionSnapshotUpload upload)` as a compatibility wrapper for one native visual snapshot
 - `checkRecordingAccess()` for access recovery checks
 
-The default HTTP transport accepts the recorder service root as `endpoint`, posts event batches to `/sessions`, posts keyframes to `/frames`, and probes recording access at `/recording-access-test`.
+The default HTTP transport accepts the recorder service root as `endpoint`, posts event batches to `/sessions`, uploads native snapshot batches to `/snapshots`, and probes recording access at `/recording-access-test`.
 
 ## License
 

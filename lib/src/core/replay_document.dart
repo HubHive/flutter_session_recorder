@@ -1,12 +1,21 @@
 import 'recorder_event.dart';
 
+int _intAttribute(Map<String, Object?> attributes, String key) {
+  final Object? value = attributes[key];
+  if (value is int) {
+    return value;
+  }
+  if (value is num) {
+    return value.round();
+  }
+  return int.tryParse(value?.toString() ?? '') ?? 0;
+}
+
 class ReplayDocument {
   const ReplayDocument({
     required this.customEvents,
     required this.errors,
-    required this.frames,
     required this.interactions,
-    required this.keyframes,
     required this.logs,
     required this.screenViews,
     required this.sessionContext,
@@ -15,13 +24,12 @@ class ReplayDocument {
     required this.startedAt,
     required this.userId,
     required this.userProperties,
+    required this.snapshots,
   });
 
   final List<ReplayCustomEvent> customEvents;
   final List<ReplayError> errors;
-  final List<ReplayFrame> frames;
   final List<ReplayInteraction> interactions;
-  final List<ReplayKeyframe> keyframes;
   final List<ReplayLog> logs;
   final List<ReplayScreenView> screenViews;
   final Map<String, Object?> sessionContext;
@@ -30,6 +38,7 @@ class ReplayDocument {
   final DateTime startedAt;
   final String? userId;
   final Map<String, Object?> userProperties;
+  final List<ReplaySnapshot> snapshots;
 
   Map<String, Object?> toJson() {
     return <String, Object?>{
@@ -39,9 +48,6 @@ class ReplayDocument {
       'userId': userId,
       'userProperties': normalizeAttributes(userProperties),
       'sessionProperties': normalizeAttributes(sessionProperties),
-      'frames': frames.map((ReplayFrame value) => value.toJson()).toList(),
-      'keyframes':
-          keyframes.map((ReplayKeyframe value) => value.toJson()).toList(),
       'screenViews':
           screenViews.map((ReplayScreenView value) => value.toJson()).toList(),
       'interactions': interactions
@@ -52,6 +58,8 @@ class ReplayDocument {
       'customEvents': customEvents
           .map((ReplayCustomEvent value) => value.toJson())
           .toList(),
+      'snapshots':
+          snapshots.map((ReplaySnapshot value) => value.toJson()).toList(),
     };
   }
 }
@@ -73,20 +81,17 @@ class ReplayAssembler {
     required String? userId,
     required Map<String, Object?> userProperties,
   }) {
-    final List<ReplayFrame> frames = <ReplayFrame>[];
     final List<ReplayScreenView> screenViews = <ReplayScreenView>[];
     final List<ReplayInteraction> interactions = <ReplayInteraction>[];
-    final List<ReplayKeyframe> keyframes = <ReplayKeyframe>[];
     final List<ReplayLog> logs = <ReplayLog>[];
     final List<ReplayError> errors = <ReplayError>[];
     final List<ReplayCustomEvent> customEvents = <ReplayCustomEvent>[];
+    final List<ReplaySnapshot> snapshots = <ReplaySnapshot>[];
 
     for (final RecorderEvent event in _events) {
       switch (event.type) {
-        case 'replay.frame':
-          frames.add(ReplayFrame.fromRecorderEvent(event));
-        case 'replay.keyframe':
-          keyframes.add(ReplayKeyframe.fromRecorderEvent(event));
+        case 'replay.snapshot':
+          snapshots.add(ReplaySnapshot.fromRecorderEvent(event));
         case 'screen.view':
           screenViews.add(ReplayScreenView.fromRecorderEvent(event));
         case 'interaction.tap':
@@ -104,9 +109,7 @@ class ReplayAssembler {
     return ReplayDocument(
       customEvents: customEvents,
       errors: errors,
-      frames: frames,
       interactions: interactions,
-      keyframes: keyframes,
       logs: logs,
       screenViews: screenViews,
       sessionContext: sessionContext,
@@ -115,97 +118,79 @@ class ReplayAssembler {
       startedAt: startedAt,
       userId: userId,
       userProperties: userProperties,
+      snapshots: snapshots,
     );
   }
 }
 
-class ReplayFrame {
-  const ReplayFrame({
+class ReplaySnapshot {
+  const ReplaySnapshot({
+    required this.format,
+    required this.height,
     required this.metadata,
     required this.screenName,
+    required this.sessionContext,
+    required this.sessionProperties,
+    required this.snapshotRef,
     required this.timestamp,
-    required this.tree,
-    required this.viewport,
+    required this.userId,
+    required this.userProperties,
+    required this.width,
   });
 
+  final String format;
+  final int height;
   final Map<String, Object?> metadata;
   final String? screenName;
+  final Map<String, Object?> sessionContext;
+  final Map<String, Object?> sessionProperties;
+  final String snapshotRef;
   final DateTime timestamp;
-  final Map<String, Object?> tree;
-  final Map<String, Object?> viewport;
+  final String? userId;
+  final Map<String, Object?> userProperties;
+  final int width;
 
-  factory ReplayFrame.fromRecorderEvent(RecorderEvent event) {
-    return ReplayFrame(
+  factory ReplaySnapshot.fromRecorderEvent(RecorderEvent event) {
+    return ReplaySnapshot(
+      format: (event.attributes['format'] as String?) ?? 'jpg',
+      height: _intAttribute(event.attributes, 'height'),
       metadata: Map<String, Object?>.from(
         (event.attributes['metadata'] as Map<Object?, Object?>?) ??
             <Object?, Object?>{},
       ),
       screenName: event.attributes['screenName'] as String?,
+      sessionContext: Map<String, Object?>.from(
+        (event.attributes['sessionContext'] as Map<Object?, Object?>?) ??
+            <Object?, Object?>{},
+      ),
+      sessionProperties: Map<String, Object?>.from(
+        (event.attributes['sessionProperties'] as Map<Object?, Object?>?) ??
+            <Object?, Object?>{},
+      ),
+      snapshotRef: (event.attributes['snapshotRef'] as String?) ?? '',
       timestamp: event.timestamp,
-      tree: Map<String, Object?>.from(
-        (event.attributes['tree'] as Map<Object?, Object?>?) ??
+      userId: event.attributes['userId'] as String?,
+      userProperties: Map<String, Object?>.from(
+        (event.attributes['userProperties'] as Map<Object?, Object?>?) ??
             <Object?, Object?>{},
       ),
-      viewport: Map<String, Object?>.from(
-        (event.attributes['viewport'] as Map<Object?, Object?>?) ??
-            <Object?, Object?>{},
-      ),
+      width: _intAttribute(event.attributes, 'width'),
     );
   }
 
   Map<String, Object?> toJson() {
     return <String, Object?>{
-      'screenName': screenName,
-      'timestamp': timestamp.toUtc().toIso8601String(),
+      'format': format,
+      'height': height,
       'metadata': normalizeAttributes(metadata),
-      'tree': normalizeAttributes(tree),
-      'viewport': normalizeAttributes(viewport),
-    };
-  }
-}
-
-class ReplayKeyframe {
-  const ReplayKeyframe({
-    required this.frameRef,
-    required this.metadata,
-    required this.reason,
-    required this.screenName,
-    required this.timestamp,
-    required this.viewport,
-  });
-
-  final String frameRef;
-  final Map<String, Object?> metadata;
-  final String reason;
-  final String? screenName;
-  final DateTime timestamp;
-  final Map<String, Object?> viewport;
-
-  factory ReplayKeyframe.fromRecorderEvent(RecorderEvent event) {
-    return ReplayKeyframe(
-      frameRef: (event.attributes['frameRef'] as String?) ?? '',
-      metadata: Map<String, Object?>.from(
-        (event.attributes['metadata'] as Map<Object?, Object?>?) ??
-            <Object?, Object?>{},
-      ),
-      reason: (event.attributes['reason'] as String?) ?? 'unknown',
-      screenName: event.attributes['screenName'] as String?,
-      timestamp: event.timestamp,
-      viewport: Map<String, Object?>.from(
-        (event.attributes['viewport'] as Map<Object?, Object?>?) ??
-            <Object?, Object?>{},
-      ),
-    );
-  }
-
-  Map<String, Object?> toJson() {
-    return <String, Object?>{
-      'frameRef': frameRef,
-      'metadata': normalizeAttributes(metadata),
-      'reason': reason,
       'screenName': screenName,
+      'sessionContext': normalizeAttributes(sessionContext),
+      'sessionProperties': normalizeAttributes(sessionProperties),
+      'snapshotRef': snapshotRef,
       'timestamp': timestamp.toUtc().toIso8601String(),
-      'viewport': normalizeAttributes(viewport),
+      'userId': userId,
+      'userProperties': normalizeAttributes(userProperties),
+      'width': width,
     };
   }
 }

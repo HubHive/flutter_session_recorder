@@ -38,8 +38,12 @@ Map<String, Object?> normalizeAttributes(Map<String, Object?> values) {
 }
 
 Object? _normalizeValue(Object? value) {
-  if (value == null || value is num || value is bool || value is String) {
+  if (value == null || value is bool || value is String) {
     return value;
+  }
+
+  if (value is num) {
+    return value.isFinite ? value : null;
   }
 
   if (value is DateTime) {

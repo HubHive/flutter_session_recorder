@@ -5,19 +5,15 @@ Future<void> main() async {
   await recorder.runApp(
     const RecorderDemoApp(),
     config: const SessionRecorderConfig.lightweight(
-      captureHybridKeyframes: true,
-      captureAdaptiveHybridKeyframes: true,
-      captureKeyframesDuringScroll: true,
-      activeHybridKeyframeInterval: Duration(milliseconds: 150),
-      activeHybridKeyframeWindow: Duration(seconds: 2),
-      hybridKeyframeInterval: Duration(seconds: 3),
-      captureNativeViewHierarchy: true,
-      nativeViewTreeSnapshotInterval: Duration(milliseconds: 700),
+      maxSnapshotUploadBatchSize: 10,
+      nativeSnapshotInterval: Duration(milliseconds: 500),
+      nativeSnapshotMaxDimension: 720,
+      snapshotUploadFlushInterval: Duration(seconds: 5),
     ),
     transport: const DebugPrintSessionRecorderTransport(),
     sessionProperties: <String, Object?>{
       'environment': 'example',
-      'platformCapture': 'hybrid_keyframes_plus_structured_events',
+      'platformCapture': 'native_snapshots_plus_structured_events',
     },
   );
 }

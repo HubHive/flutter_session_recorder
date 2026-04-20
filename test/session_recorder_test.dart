@@ -1,7 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
-import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart' as widgets;
 import 'package:flutter_session_recorder/flutter_session_recorder.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -9,8 +9,9 @@ import 'package:http/testing.dart';
 
 class _FakeTransport implements SessionRecorderTransport {
   final List<SessionBatch> batches = <SessionBatch>[];
-  final List<_UploadedKeyframeRecord> uploadedKeyframes =
-      <_UploadedKeyframeRecord>[];
+  final List<int> snapshotUploadBatchSizes = <int>[];
+  final List<_UploadedSnapshotRecord> uploadedSnapshots =
+      <_UploadedSnapshotRecord>[];
   int accessCheckCount = 0;
   bool hasRecordingAccess = true;
   Object? sendError;
@@ -26,20 +27,30 @@ class _FakeTransport implements SessionRecorderTransport {
   }
 
   @override
-  Future<UploadedKeyframe> uploadKeyframe(SessionKeyframeUpload upload) async {
+  Future<UploadedSnapshot> uploadSnapshot(SessionSnapshotUpload upload) async {
+    return (await uploadSnapshots(<SessionSnapshotUpload>[upload])).single;
+  }
+
+  @override
+  Future<List<UploadedSnapshot>> uploadSnapshots(
+    List<SessionSnapshotUpload> uploads,
+  ) async {
     final Object? error = uploadError;
     if (error != null) {
       throw error;
     }
-    final String frameRef =
-        'frame_${uploadedKeyframes.length + 1}_${upload.reason}';
-    uploadedKeyframes.add(
-      _UploadedKeyframeRecord(
-        frameRef: frameRef,
-        upload: upload,
-      ),
-    );
-    return UploadedKeyframe(frameRef: frameRef);
+    snapshotUploadBatchSizes.add(uploads.length);
+    return uploads.map((SessionSnapshotUpload upload) {
+      final String snapshotRef =
+          'snapshot_${uploadedSnapshots.length + 1}_${upload.snapshotId}';
+      uploadedSnapshots.add(
+        _UploadedSnapshotRecord(
+          snapshotRef: snapshotRef,
+          upload: upload,
+        ),
+      );
+      return UploadedSnapshot(snapshotRef: snapshotRef);
+    }).toList(growable: false);
   }
 
   @override
@@ -49,14 +60,14 @@ class _FakeTransport implements SessionRecorderTransport {
   }
 }
 
-class _UploadedKeyframeRecord {
-  const _UploadedKeyframeRecord({
-    required this.frameRef,
+class _UploadedSnapshotRecord {
+  const _UploadedSnapshotRecord({
+    required this.snapshotRef,
     required this.upload,
   });
 
-  final String frameRef;
-  final SessionKeyframeUpload upload;
+  final String snapshotRef;
+  final SessionSnapshotUpload upload;
 }
 
 class _FakeNativeBridge implements SessionRecorderNativeBridge {
@@ -64,6 +75,7 @@ class _FakeNativeBridge implements SessionRecorderNativeBridge {
       StreamController<Map<String, Object?>>.broadcast();
 
   bool started = false;
+  bool snapshotStarted = false;
   SessionRecorderConfig? lastConfig;
   String? lastScreenName;
   Map<String, Object?> deviceContext = <String, Object?>{
@@ -100,6 +112,7 @@ class _FakeNativeBridge implements SessionRecorderNativeBridge {
   @override
   Future<void> pauseCapture() async {
     started = false;
+    snapshotStarted = false;
   }
 
   @override
@@ -115,8 +128,20 @@ class _FakeNativeBridge implements SessionRecorderNativeBridge {
   }
 
   @override
+  Future<void> startSnapshotCapture(SessionRecorderConfig config) async {
+    snapshotStarted = true;
+    lastConfig = config;
+  }
+
+  @override
+  Future<void> stopSnapshotCapture() async {
+    snapshotStarted = false;
+  }
+
+  @override
   Future<void> stopCapture() async {
     started = false;
+    snapshotStarted = false;
   }
 
   Future<void> dispose() => _controller.close();
@@ -129,192 +154,84 @@ void main() {
     await recorder.resetForTest();
   });
 
-  test('records lifecycle and custom events into a batch', () async {
+  test('lightweight config is snapshot-first with no old visual mode knobs',
+      () {
+    const config = SessionRecorderConfig.lightweight(
+      recordingDomain: 'app.hubhive.com',
+    );
+
+    expect(config.nativeSnapshotInterval, const Duration(milliseconds: 500));
+    expect(config.nativeSnapshotJpegQuality, 0.65);
+    expect(config.nativeSnapshotMaxDimension, 720);
+    expect(config.maxSnapshotUploadBatchSize, 10);
+    expect(config.snapshotUploadFlushInterval, const Duration(seconds: 5));
+    expect(config.recordingDomain, 'app.hubhive.com');
+    expect(config.toJson(), containsPair('nativeSnapshotIntervalMs', 500));
+    expect(config.toJson(), containsPair('nativeSnapshotJpegQuality', 0.65));
+    expect(config.toJson(), containsPair('nativeSnapshotMaxDimension', 720));
+    expect(config.toJson(), containsPair('maxSnapshotUploadBatchSize', 10));
+    expect(
+      config.toJson(),
+      containsPair('snapshotUploadFlushIntervalMs', 5000),
+    );
+    expect(config.toJson(), containsPair('recordingDomain', 'app.hubhive.com'));
+    expect(config.toJson(), isNot(contains('captureSchematicFrames')));
+    expect(config.toJson(), isNot(contains('captureScreenshotKeyframes')));
+    expect(config.toJson(), isNot(contains('uploadAssetImages')));
+  });
+
+  test('records lifecycle and custom events into a visual session batch',
+      () async {
     final transport = _FakeTransport();
     final nativeBridge = _FakeNativeBridge();
     final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
+      config: const SessionRecorderConfig.lightweight(
+        maxSnapshotUploadBatchSize: 1,
+        recordingDomain: 'app.hubhive.com',
+      ),
       nativeBridge: nativeBridge,
       transport: transport,
     );
 
     await sessionRecorder.start(
+      sessionProperties: <String, Object?>{'environment': 'test'},
       userId: 'user-1',
-      sessionProperties: <String, Object?>{'plan': 'pro'},
+      userProperties: <String, Object?>{'plan': 'pro'},
     );
-
+    sessionRecorder.trackScreenView('Home');
     sessionRecorder.trackCustomEvent(
       'checkout_started',
       properties: <String, Object?>{'cartValue': 42},
     );
-
     await sessionRecorder.stop();
 
-    expect(transport.batches, hasLength(1));
-    final events = transport.batches.single.events;
-    expect(events.map((RecorderEvent event) => event.type), <String>[
-      'session.started',
-      'custom',
-      'session.stopped',
-    ]);
+    final List<RecorderEvent> events = transport.batches
+        .expand((SessionBatch batch) => batch.events)
+        .toList(growable: false);
+
+    expect(nativeBridge.started, isFalse);
+    expect(nativeBridge.snapshotStarted, isFalse);
     expect(
-      transport.batches.single.sessionContext['device'],
-      containsPair('model', 'iPhone XR'),
-    );
+        events.map((RecorderEvent event) => event.type),
+        containsAll(
+          <String>[
+            'session.started',
+            'screen.view',
+            'custom',
+            'session.stopped'
+          ],
+        ));
+    expect(transport.batches.single.userId, 'user-1');
+    expect(transport.batches.single.sessionProperties['environment'], 'test');
     expect(
-      transport.batches.single.sessionContext.containsKey('network'),
-      isFalse,
+      transport.batches.single.sessionContext['recordingDomain'],
+      'app.hubhive.com',
     );
 
     await nativeBridge.dispose();
   });
 
-  test('setUser flushes updated user payloads to transport', () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-    final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
-      nativeBridge: nativeBridge,
-      transport: transport,
-    );
-
-    await sessionRecorder.start();
-    await sessionRecorder.setUser(
-      'user-42',
-      userProperties: <String, Object?>{'plan': 'pro'},
-    );
-
-    expect(transport.batches, isNotEmpty);
-    expect(transport.batches.last.userId, 'user-42');
-    expect(
-      transport.batches.last.userProperties,
-      containsPair('plan', 'pro'),
-    );
-    expect(
-      transport.batches.last.events.any(
-        (RecorderEvent event) =>
-            event.type == 'user.identified' &&
-            event.attributes['userId'] == 'user-42',
-      ),
-      isTrue,
-    );
-
-    await sessionRecorder.stop();
-    await nativeBridge.dispose();
-  });
-
-  test('lightweight config enables adaptive hybrid keyframe defaults', () {
-    const config = SessionRecorderConfig.lightweight();
-
-    expect(config.captureHybridKeyframes, isTrue);
-    expect(config.captureAdaptiveHybridKeyframes, isTrue);
-    expect(config.captureKeyframesDuringScroll, isTrue);
-    expect(
-      config.activeHybridKeyframeInterval,
-      const Duration(milliseconds: 150),
-    );
-    expect(
-      config.activeHybridKeyframeWindow,
-      const Duration(seconds: 2),
-    );
-    expect(
-      config.scrollKeyframeThrottle,
-      const Duration(milliseconds: 175),
-    );
-  });
-
-  test('trackScreenView syncs the Flutter route name to the native bridge',
-      () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-    final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
-      nativeBridge: nativeBridge,
-      transport: transport,
-    );
-
-    await sessionRecorder.start();
-    sessionRecorder.trackScreenView('Checkout');
-    await Future<void>.delayed(Duration.zero);
-
-    expect(nativeBridge.lastScreenName, 'Checkout');
-
-    await sessionRecorder.stop();
-    await nativeBridge.dispose();
-  });
-
-  test('HTTP transport derives session and frame endpoints from root endpoint',
-      () async {
-    final List<Uri> requestedUrls = <Uri>[];
-    final MockClient client = MockClient((http.Request request) async {
-      requestedUrls.add(request.url);
-      if (request.url.path == '/recording-access-test') {
-        return http.Response('', 200);
-      }
-      if (request.url.path == '/frames') {
-        return http.Response('{"frameRef":"frame-from-server"}', 200);
-      }
-      return http.Response('{}', 200);
-    });
-    final transport = HttpSessionRecorderTransport(
-      endpoint: Uri.parse('http://recorder.test:8081'),
-      client: client,
-    );
-    final DateTime timestamp = DateTime.utc(2026, 4, 13, 12);
-
-    await transport.send(
-      SessionBatch(
-        events: <RecorderEvent>[],
-        sentAt: timestamp,
-        sessionContext: <String, Object?>{},
-        sessionId: 'session-1',
-        sessionProperties: <String, Object?>{},
-        startedAt: timestamp,
-        userId: null,
-        userProperties: <String, Object?>{},
-      ),
-    );
-    final UploadedKeyframe uploadedKeyframe = await transport.uploadKeyframe(
-      SessionKeyframeUpload(
-        bytes: <int>[1, 2, 3],
-        format: 'png',
-        metadata: <String, Object?>{},
-        reason: 'tap',
-        screenName: 'Checkout',
-        sessionId: 'session-1',
-        timestamp: timestamp,
-        viewport: <String, Object?>{'width': 390, 'height': 844},
-      ),
-    );
-    final bool hasRecordingAccess = await transport.checkRecordingAccess();
-
-    expect(
-      requestedUrls,
-      <Uri>[
-        Uri.parse('http://recorder.test:8081/sessions'),
-        Uri.parse('http://recorder.test:8081/frames'),
-        Uri.parse('http://recorder.test:8081/recording-access-test'),
-      ],
-    );
-    expect(uploadedKeyframe.frameRef, 'frame-from-server');
-    expect(hasRecordingAccess, isTrue);
-  });
-
-  test('HTTP transport treats recording access 403 as disabled', () async {
-    final MockClient client = MockClient((http.Request request) async {
-      expect(
-          request.url, Uri.parse('http://recorder.test/recording-access-test'));
-      return http.Response('', 403);
-    });
-    final transport = HttpSessionRecorderTransport(
-      endpoint: Uri.parse('http://recorder.test'),
-      client: client,
-    );
-
-    expect(await transport.checkRecordingAccess(), isFalse);
-  });
-
-  test('captures native replay frames and interactions through the bridge',
+  test('changing the current user starts a new session without app restart',
       () async {
     final transport = _FakeTransport();
     final nativeBridge = _FakeNativeBridge();
@@ -322,19 +239,203 @@ void main() {
     await recorder.initialize(
       nativeBridge: nativeBridge,
       transport: transport,
-      config: const SessionRecorderConfig.lightweight(),
+      userId: 'user-a',
+    );
+
+    final String firstSessionId = recorder.sessionId!;
+    await recorder.setUser(
+      'user-b',
+      userProperties: <String, Object?>{'role': 'owner'},
+    );
+
+    expect(recorder.sessionId, isNot(firstSessionId));
+    expect(recorder.userId, 'user-b');
+    recorder.recordEvent('after_user_change');
+    await recorder.stop();
+
+    final List<SessionBatch> userBBatches = transport.batches
+        .where((SessionBatch batch) => batch.userId == 'user-b')
+        .toList(growable: false);
+    expect(userBBatches, isNotEmpty);
+    expect(userBBatches.last.userProperties['role'], 'owner');
+
+    await nativeBridge.dispose();
+  });
+
+  test('HTTP transport posts only sessions, snapshots, and access checks',
+      () async {
+    final List<Uri> requestedUris = <Uri>[];
+    final Map<String, String> snapshotFields = <String, String>{};
+    final client = MockClient((http.Request request) async {
+      requestedUris.add(request.url);
+      if (request.url.path == '/snapshots') {
+        final String body = request.body;
+        for (final String field in <String>[
+          'metadata',
+          'sessionContext',
+          'sessionProperties',
+          'userId',
+          'userProperties',
+        ]) {
+          final RegExpMatch? match = RegExp(
+            'name="$field"\\r\\n\\r\\n([^\\r]*)',
+          ).firstMatch(body);
+          if (match != null) {
+            snapshotFields[field] = match.group(1)!;
+          }
+        }
+        return http.Response('{"snapshotRef":"snapshot-from-server"}', 200);
+      }
+      return http.Response('{}', 200);
+    });
+    final transport = HttpSessionRecorderTransport(
+      endpoint: Uri.parse('http://recorder.test:8081'),
+      apiKey: 'demo-key',
+      client: client,
+    );
+    final DateTime timestamp = DateTime.utc(2026);
+
+    await transport.send(
+      SessionBatch(
+        events: <RecorderEvent>[RecorderEvent(type: 'custom')],
+        sentAt: timestamp,
+        sessionId: 'session-1',
+        sessionContext: const <String, Object?>{},
+        sessionProperties: const <String, Object?>{},
+        startedAt: timestamp,
+        userId: null,
+        userProperties: const <String, Object?>{},
+      ),
+    );
+    final UploadedSnapshot uploadedSnapshot = await transport.uploadSnapshot(
+      SessionSnapshotUpload(
+        bytes: <int>[7, 8, 9],
+        contentType: 'image/jpeg',
+        filename: 'snapshot.jpg',
+        format: 'jpg',
+        height: 844,
+        metadata: <String, Object?>{
+          'unsafe': double.infinity,
+        },
+        screenName: 'Checkout',
+        sessionContext: const <String, Object?>{
+          'device': <String, Object?>{'model': 'iPhone XR'},
+          'recordingDomain': 'app.hubhive.com',
+        },
+        snapshotId: 'snapshot-1',
+        sessionId: 'session-1',
+        sessionProperties: const <String, Object?>{
+          'environment': 'test',
+        },
+        timestamp: timestamp,
+        userId: 'user-1',
+        userProperties: const <String, Object?>{
+          'plan': 'pro',
+        },
+        width: 390,
+      ),
+    );
+    final bool hasRecordingAccess = await transport.checkRecordingAccess();
+
+    expect(requestedUris, <Uri>[
+      Uri.parse('http://recorder.test:8081/sessions'),
+      Uri.parse('http://recorder.test:8081/snapshots'),
+      Uri.parse('http://recorder.test:8081/recording-access-test'),
+    ]);
+    expect(uploadedSnapshot.snapshotRef, 'snapshot-from-server');
+    expect(hasRecordingAccess, isTrue);
+    expect(
+      jsonDecode(snapshotFields['sessionContext']!) as Map<String, Object?>,
+      containsPair('recordingDomain', 'app.hubhive.com'),
+    );
+    expect(
+      jsonDecode(snapshotFields['sessionProperties']!) as Map<String, Object?>,
+      containsPair('environment', 'test'),
+    );
+    expect(snapshotFields['userId'], 'user-1');
+    expect(
+      jsonDecode(snapshotFields['userProperties']!) as Map<String, Object?>,
+      containsPair('plan', 'pro'),
+    );
+  });
+
+  test('HTTP transport posts multiple snapshots in one multipart request',
+      () async {
+    final List<Uri> requestedUris = <Uri>[];
+    String multipartBody = '';
+    final client = MockClient((http.Request request) async {
+      requestedUris.add(request.url);
+      multipartBody = request.body;
+      return http.Response(
+        '{"snapshots":[{"snapshotId":"snapshot-1","snapshotRef":"ref-1"},{"snapshotId":"snapshot-2","snapshotRef":"ref-2"}]}',
+        200,
+      );
+    });
+    final transport = HttpSessionRecorderTransport(
+      endpoint: Uri.parse('http://recorder.test:8081'),
+      client: client,
+    );
+
+    final List<UploadedSnapshot> uploadedSnapshots =
+        await transport.uploadSnapshots(<SessionSnapshotUpload>[
+      SessionSnapshotUpload(
+        bytes: <int>[1, 2, 3],
+        contentType: 'image/jpeg',
+        format: 'jpg',
+        height: 844,
+        metadata: const <String, Object?>{},
+        screenName: 'Home',
+        sessionContext: const <String, Object?>{},
+        sessionId: 'session-1',
+        sessionProperties: const <String, Object?>{},
+        snapshotId: 'snapshot-1',
+        timestamp: DateTime.utc(2026),
+        userProperties: const <String, Object?>{},
+        width: 390,
+      ),
+      SessionSnapshotUpload(
+        bytes: <int>[4, 5, 6],
+        contentType: 'image/jpeg',
+        format: 'jpg',
+        height: 844,
+        metadata: const <String, Object?>{},
+        screenName: 'Home',
+        sessionContext: const <String, Object?>{},
+        sessionId: 'session-1',
+        sessionProperties: const <String, Object?>{},
+        snapshotId: 'snapshot-2',
+        timestamp: DateTime.utc(2026),
+        userProperties: const <String, Object?>{},
+        width: 390,
+      ),
+    ]);
+
+    expect(requestedUris, <Uri>[
+      Uri.parse('http://recorder.test:8081/snapshots'),
+    ]);
+    expect(
+      uploadedSnapshots.map((UploadedSnapshot upload) => upload.snapshotRef),
+      <String>['ref-1', 'ref-2'],
+    );
+    expect(multipartBody, contains('name="snapshots"'));
+    expect(multipartBody, contains('"fileField":"snapshot_0"'));
+    expect(multipartBody, contains('name="snapshot_0"'));
+    expect(multipartBody, contains('name="snapshot_1"'));
+  });
+
+  test('native interactions are captured and unsupported events are ignored',
+      () async {
+    final transport = _FakeTransport();
+    final nativeBridge = _FakeNativeBridge();
+
+    await recorder.initialize(
+      nativeBridge: nativeBridge,
+      transport: transport,
     );
 
     nativeBridge.emit(
-      'replay.frame',
-      attributes: <String, Object?>{
-        'screenName': 'HomeScreen',
-        'tree': <String, Object?>{
-          'id': 'root',
-          'type': 'FlutterView',
-          'children': <Object?>[],
-        },
-      },
+      'native.unsupported',
+      attributes: <String, Object?>{'screenName': 'HomeScreen'},
     );
     nativeBridge.emit(
       'interaction.tap',
@@ -344,14 +445,6 @@ void main() {
         'dy': 90.0,
       },
     );
-    nativeBridge.emit(
-      'interaction.scroll',
-      attributes: <String, Object?>{
-        'screenName': 'HomeScreen',
-        'pixels': 320.0,
-        'axis': 'vertical',
-      },
-    );
 
     await Future<void>.delayed(Duration.zero);
     await recorder.stop();
@@ -361,71 +454,253 @@ void main() {
         .map((RecorderEvent event) => event.type)
         .toList(growable: false);
 
-    expect(eventTypes, contains('replay.frame'));
+    expect(eventTypes, isNot(contains('native.unsupported')));
     expect(eventTypes, contains('interaction.tap'));
-    expect(eventTypes, contains('interaction.scroll'));
-    expect(nativeBridge.started, isFalse);
 
     await nativeBridge.dispose();
   });
 
-  test('pauseCapture suppresses recording until resumeCapture', () async {
+  test('native visual capture errors are recorded as error events', () async {
     final transport = _FakeTransport();
     final nativeBridge = _FakeNativeBridge();
-    final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
+
+    await recorder.initialize(
       nativeBridge: nativeBridge,
       transport: transport,
     );
 
-    await sessionRecorder.start();
-    await sessionRecorder.pauseCapture();
-
-    sessionRecorder.trackCustomEvent('while_paused');
     nativeBridge.emit(
-      'replay.frame',
+      'native.snapshot_capture.error',
       attributes: <String, Object?>{
-        'screenName': 'PausedScreen',
-        'tree': <String, Object?>{'id': 'paused'},
+        'message': 'Native visual capture stopped unexpectedly',
+        'platform': 'ios',
       },
     );
-    await Future<void>.delayed(Duration.zero);
 
-    await sessionRecorder.resumeCapture();
-    sessionRecorder.trackCustomEvent('after_resume');
-    nativeBridge.emit(
-      'replay.frame',
-      attributes: <String, Object?>{
-        'screenName': 'ResumedScreen',
-        'tree': <String, Object?>{'id': 'resumed'},
-      },
+    await Future<void>.delayed(Duration.zero);
+    await recorder.stop();
+
+    final RecorderEvent errorEvent = transport.batches
+        .expand((SessionBatch batch) => batch.events)
+        .singleWhere((RecorderEvent event) => event.type == 'error');
+
+    expect(errorEvent.attributes['logger'], 'native_snapshot_capture');
+    expect(
+      errorEvent.attributes['error'],
+      'Native visual capture stopped unexpectedly',
     );
-    await Future<void>.delayed(Duration.zero);
-    await sessionRecorder.stop();
-
-    final List<String> eventTypes = transport.batches
-        .expand((SessionBatch batch) => batch.events)
-        .map((RecorderEvent event) => event.type)
-        .toList(growable: false);
-    final List<String?> customNames = transport.batches
-        .expand((SessionBatch batch) => batch.events)
-        .where((RecorderEvent event) => event.type == 'custom')
-        .map((RecorderEvent event) => event.attributes['name'] as String?)
-        .toList(growable: false);
-
-    expect(nativeBridge.started, isFalse);
-    expect(eventTypes, contains('session.paused'));
-    expect(eventTypes, contains('session.resumed'));
-    expect(customNames, isNot(contains('while_paused')));
-    expect(customNames, contains('after_resume'));
+    expect(
+      errorEvent.attributes['properties'],
+      containsPair('platform', 'ios'),
+    );
 
     await nativeBridge.dispose();
   });
 
-  test('403 from batch upload pauses capture and only probes access endpoint',
+  test('native visual capture status events are recorded as logs', () async {
+    final transport = _FakeTransport();
+    final nativeBridge = _FakeNativeBridge();
+
+    await recorder.initialize(
+      nativeBridge: nativeBridge,
+      transport: transport,
+    );
+
+    nativeBridge.emit(
+      'native.snapshot_capture.status',
+      attributes: <String, Object?>{
+        'message': 'Window snapshot captured.',
+        'phase': 'snapshot_captured',
+        'platform': 'ios',
+      },
+    );
+
+    await Future<void>.delayed(Duration.zero);
+    await recorder.stop();
+
+    final RecorderEvent logEvent = transport.batches
+        .expand((SessionBatch batch) => batch.events)
+        .singleWhere(
+          (RecorderEvent event) =>
+              event.type == 'log' &&
+              event.attributes['logger'] == 'native_snapshot_capture' &&
+              event.attributes['message'] == 'Window snapshot captured.',
+        );
+
+    expect(
+      logEvent.attributes['properties'],
+      containsPair('phase', 'snapshot_captured'),
+    );
+
+    await nativeBridge.dispose();
+  });
+
+  test('uploads native snapshots and records snapshot refs', () async {
+    final transport = _FakeTransport();
+    final nativeBridge = _FakeNativeBridge();
+    final sessionRecorder = SessionRecorder(
+      config: const SessionRecorderConfig.lightweight(
+        recordingDomain: 'app.hubhive.com',
+      ),
+      nativeBridge: nativeBridge,
+      transport: transport,
+    );
+    final Directory tempDir =
+        await Directory.systemTemp.createTemp('session-recorder-test-');
+    final File snapshotFile = File('${tempDir.path}/snapshot.jpg');
+    await snapshotFile.writeAsBytes(<int>[1, 2, 3, 4, 5]);
+
+    await sessionRecorder.start(
+      sessionProperties: <String, Object?>{'environment': 'test'},
+      userId: 'viewer-user',
+      userProperties: <String, Object?>{'plan': 'pro'},
+    );
+    expect(nativeBridge.snapshotStarted, isTrue);
+
+    nativeBridge.emit(
+      'replay.snapshot.ready',
+      attributes: <String, Object?>{
+        'contentType': 'image/jpeg',
+        'filePath': snapshotFile.path,
+        'fileSize': 5,
+        'format': 'jpg',
+        'height': 844,
+        'screenName': 'Checkout',
+        'snapshotId': 'snapshot-1',
+        'sequence': 1,
+        'timestampMs': 1000,
+        'width': 390,
+      },
+      timestampMs: 1200,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await sessionRecorder.flush();
+
+    expect(transport.uploadedSnapshots, hasLength(1));
+    expect(transport.uploadedSnapshots.single.upload.bytes, <int>[
+      1,
+      2,
+      3,
+      4,
+      5,
+    ]);
+    expect(
+      transport.uploadedSnapshots.single.upload.sessionContext['device'],
+      isNotNull,
+    );
+    expect(
+      transport
+          .uploadedSnapshots.single.upload.sessionContext['recordingDomain'],
+      'app.hubhive.com',
+    );
+    expect(
+      transport.uploadedSnapshots.single.upload.sessionProperties,
+      containsPair('environment', 'test'),
+    );
+    expect(transport.uploadedSnapshots.single.upload.userId, 'viewer-user');
+    expect(
+      transport.uploadedSnapshots.single.upload.userProperties,
+      containsPair('plan', 'pro'),
+    );
+    expect(await snapshotFile.exists(), isFalse);
+    expect(
+      sessionRecorder.buildReplayDocument()?.snapshots.single.snapshotRef,
+      'snapshot_1_snapshot-1',
+    );
+    expect(
+      sessionRecorder.buildReplayDocument()?.snapshots.single.sessionContext,
+      containsPair('recordingDomain', 'app.hubhive.com'),
+    );
+    expect(
+      sessionRecorder.buildReplayDocument()?.snapshots.single.sessionProperties,
+      containsPair('environment', 'test'),
+    );
+
+    await sessionRecorder.stop();
+
+    final List<RecorderEvent> allEvents = transport.batches
+        .expand((SessionBatch batch) => batch.events)
+        .toList(growable: false);
+    final RecorderEvent snapshotEvent = allEvents.singleWhere(
+      (RecorderEvent event) => event.type == 'replay.snapshot',
+    );
+
+    expect(snapshotEvent.attributes['snapshotRef'], 'snapshot_1_snapshot-1');
+    expect(snapshotEvent.attributes['screenName'], 'Checkout');
+    expect(snapshotEvent.attributes['format'], 'jpg');
+    expect(
+      snapshotEvent.attributes['sessionProperties'],
+      containsPair('environment', 'test'),
+    );
+    expect(
+      snapshotEvent.attributes['sessionContext'],
+      containsPair('recordingDomain', 'app.hubhive.com'),
+    );
+    expect(snapshotEvent.attributes['userId'], 'viewer-user');
+    expect(nativeBridge.snapshotStarted, isFalse);
+
+    await tempDir.delete(recursive: true);
+    await nativeBridge.dispose();
+  });
+
+  test('batches native snapshot uploads before recording refs', () async {
+    final transport = _FakeTransport();
+    final nativeBridge = _FakeNativeBridge();
+    final sessionRecorder = SessionRecorder(
+      config: const SessionRecorderConfig.lightweight(
+        maxSnapshotUploadBatchSize: 3,
+        snapshotUploadFlushInterval: Duration(minutes: 1),
+      ),
+      nativeBridge: nativeBridge,
+      transport: transport,
+    );
+    final Directory tempDir =
+        await Directory.systemTemp.createTemp('session-recorder-test-');
+
+    await sessionRecorder.start();
+    for (int index = 0; index < 3; index += 1) {
+      final File snapshotFile = File('${tempDir.path}/snapshot_$index.jpg');
+      await snapshotFile.writeAsBytes(<int>[index, index + 1, index + 2]);
+      await sessionRecorder.trackNativeSnapshot(
+        contentType: 'image/jpeg',
+        filePath: snapshotFile.path,
+        format: 'jpg',
+        height: 844,
+        screenName: 'Home',
+        snapshotId: 'snapshot-$index',
+        timestamp: DateTime.utc(2026, 1, 1, 0, 0, index),
+        width: 390,
+      );
+    }
+    await sessionRecorder.flush();
+    await sessionRecorder.stop();
+
+    expect(transport.snapshotUploadBatchSizes, contains(3));
+    expect(transport.uploadedSnapshots, hasLength(3));
+
+    final List<RecorderEvent> snapshotEvents = transport.batches
+        .expand((SessionBatch batch) => batch.events)
+        .where((RecorderEvent event) => event.type == 'replay.snapshot')
+        .toList(growable: false);
+    expect(snapshotEvents, hasLength(3));
+    expect(
+      snapshotEvents
+          .map((RecorderEvent event) => event.attributes['snapshotRef']),
+      containsAll(<String>[
+        'snapshot_1_snapshot-0',
+        'snapshot_2_snapshot-1',
+        'snapshot_3_snapshot-2',
+      ]),
+    );
+
+    await tempDir.delete(recursive: true);
+    await nativeBridge.dispose();
+  });
+
+  test('403 from snapshot upload pauses recording and starts access probing',
       () async {
     final transport = _FakeTransport()
-      ..sendError = const SessionRecorderTransportException(
+      ..uploadError = const SessionRecorderTransportException(
         'forbidden',
         statusCode: 403,
       )
@@ -433,439 +708,92 @@ void main() {
     final nativeBridge = _FakeNativeBridge();
     final sessionRecorder = SessionRecorder(
       config: const SessionRecorderConfig.lightweight(
+        maxSnapshotUploadBatchSize: 1,
         recordingAccessCheckInterval: Duration(milliseconds: 1),
       ),
       nativeBridge: nativeBridge,
       transport: transport,
     );
-    final List<bool> captureStates = <bool>[];
-    sessionRecorder.addCaptureStateListener(captureStates.add);
+    final Directory tempDir =
+        await Directory.systemTemp.createTemp('session-recorder-test-');
+    final File snapshotFile = File('${tempDir.path}/snapshot.jpg');
+    await snapshotFile.writeAsBytes(<int>[1, 2, 3]);
 
     await sessionRecorder.start();
-    sessionRecorder.trackCustomEvent('before_forbidden');
-    await sessionRecorder.flush();
-    sessionRecorder.trackCustomEvent('while_forbidden');
-    nativeBridge.emit(
-      'interaction.tap',
-      attributes: <String, Object?>{'dx': 1, 'dy': 2},
+    await sessionRecorder.trackNativeSnapshot(
+      contentType: 'image/jpeg',
+      filePath: snapshotFile.path,
+      format: 'jpg',
+      height: 844,
+      screenName: 'Home',
+      snapshotId: 'snapshot-403',
+      timestamp: DateTime.utc(2026),
+      width: 390,
     );
+    await sessionRecorder.flush();
     await Future<void>.delayed(const Duration(milliseconds: 5));
 
     expect(sessionRecorder.isRecordingAccessDenied, isTrue);
     expect(sessionRecorder.isCapturePaused, isTrue);
-    expect(nativeBridge.started, isFalse);
-    expect(captureStates, contains(true));
-    expect(transport.batches, isEmpty);
+    expect(nativeBridge.snapshotStarted, isFalse);
     expect(transport.accessCheckCount, greaterThan(0));
-
-    transport.sendError = null;
-    transport.hasRecordingAccess = true;
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-    sessionRecorder.trackCustomEvent('after_restore');
-    await sessionRecorder.flush();
-
-    expect(sessionRecorder.isRecordingAccessDenied, isFalse);
-    expect(sessionRecorder.isCapturePaused, isFalse);
-    expect(nativeBridge.started, isTrue);
-    expect(captureStates, contains(false));
-    expect(
-      transport.batches
-          .expand((SessionBatch batch) => batch.events)
-          .where((RecorderEvent event) => event.type == 'custom')
-          .map((RecorderEvent event) => event.attributes['name']),
-      contains('after_restore'),
-    );
-    expect(
-      transport.batches
-          .expand((SessionBatch batch) => batch.events)
-          .where((RecorderEvent event) => event.type == 'custom')
-          .map((RecorderEvent event) => event.attributes['name']),
-      isNot(contains('while_forbidden')),
-    );
+    expect(await snapshotFile.exists(), isFalse);
 
     await sessionRecorder.stop();
-    await nativeBridge.dispose();
-  });
-
-  test('403 from keyframe upload pauses capture without enqueuing keyframe',
-      () async {
-    final transport = _FakeTransport()
-      ..uploadError = const SessionRecorderTransportException(
-        'forbidden',
-        statusCode: 403,
-      );
-    final nativeBridge = _FakeNativeBridge();
-    final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
-      nativeBridge: nativeBridge,
-      transport: transport,
-    );
-
-    await sessionRecorder.start();
-    await sessionRecorder.trackKeyframe(
-      bytes: <int>[1, 2, 3],
-      reason: 'tap',
-      screenName: 'Checkout',
-      viewport: <String, Object?>{'width': 390, 'height': 844},
-    );
-
-    expect(sessionRecorder.isRecordingAccessDenied, isTrue);
-    expect(sessionRecorder.isCapturePaused, isTrue);
-    expect(sessionRecorder.buildReplayDocument()?.keyframes, isEmpty);
-    expect(nativeBridge.started, isFalse);
-
-    await sessionRecorder.stop();
-    await nativeBridge.dispose();
-  });
-
-  test('pause and resume notify capture state listeners', () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-    final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
-      nativeBridge: nativeBridge,
-      transport: transport,
-    );
-    final List<bool> states = <bool>[];
-
-    sessionRecorder.addCaptureStateListener(states.add);
-
-    await sessionRecorder.start();
-    await sessionRecorder.pauseCapture();
-    await sessionRecorder.resumeCapture();
-    await sessionRecorder.stop();
-
-    expect(states, <bool>[true, false]);
-
+    await tempDir.delete(recursive: true);
     await nativeBridge.dispose();
   });
 
   test('captures logs and errors into the session stream', () async {
     final transport = _FakeTransport();
     final nativeBridge = _FakeNativeBridge();
-
-    await recorder.initialize(
-      nativeBridge: nativeBridge,
-      transport: transport,
-      config: const SessionRecorderConfig.lightweight(
-        captureConsoleLogs: true,
-      ),
-    );
-
-    recorder.log(
-      'manual log entry',
-      logger: 'test',
-    );
-    debugPrint('debug print entry');
-    recorder.error(
-      StateError('boom'),
-      logger: 'test',
-    );
-
-    await recorder.stop();
-
-    final List<RecorderEvent> events = transport.batches
-        .expand((SessionBatch batch) => batch.events)
-        .toList(growable: false);
-
-    expect(events.any((RecorderEvent event) => event.type == 'log'), isTrue);
-    expect(events.any((RecorderEvent event) => event.type == 'error'), isTrue);
-    expect(
-      events.any(
-        (RecorderEvent event) =>
-            event.type == 'log' && event.attributes['logger'] == 'debugPrint',
-      ),
-      isTrue,
-    );
-
-    await nativeBridge.dispose();
-  });
-
-  test('global recorder supports recording from any file after one setup',
-      () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-
-    await recorder.initialize(
-      nativeBridge: nativeBridge,
-      transport: transport,
-      config: const SessionRecorderConfig.lightweight(),
-    );
-
-    recorder.recordEvent(
-      'global_event',
-      properties: <String, Object?>{'source': 'any_file'},
-    );
-
-    await recorder.stop();
-
-    final List<String> eventTypes = transport.batches
-        .expand((SessionBatch batch) => batch.events)
-        .map((RecorderEvent event) => event.type)
-        .toList(growable: false);
-
-    expect(eventTypes, contains('custom'));
-
-    await nativeBridge.dispose();
-  });
-
-  test(
-      'changing the current user starts a new session without restarting the app',
-      () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-
-    await recorder.initialize(
-      nativeBridge: nativeBridge,
-      transport: transport,
-      config: const SessionRecorderConfig.lightweight(),
-    );
-
-    recorder.recordEvent('before_login');
-    await recorder.setUser(
-      'user-1',
-      userProperties: <String, Object?>{'plan': 'starter'},
-    );
-    recorder.recordEvent('after_login');
-    await recorder.setUser(
-      'user-2',
-      userProperties: <String, Object?>{'plan': 'pro'},
-    );
-    recorder.recordEvent('after_switch');
-    await recorder.stop();
-
-    final List<String> sessionIds = transport.batches
-        .map((SessionBatch batch) => batch.sessionId)
-        .toSet()
-        .toList(growable: false);
-
-    expect(sessionIds.length, 2);
-    expect(transport.batches.first.userId, 'user-1');
-    expect(transport.batches.last.userId, 'user-2');
-
-    await nativeBridge.dispose();
-  });
-
-  test('resuming after the background timeout starts a new session', () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-    DateTime currentTime = DateTime.utc(2026, 4, 8, 12, 0, 0);
     final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(
-        backgroundSessionTimeout: Duration(minutes: 2),
-      ),
-      nativeBridge: nativeBridge,
-      now: () => currentTime,
-      transport: transport,
-    );
-
-    await sessionRecorder.start(userId: 'user-1');
-    await sessionRecorder.pauseCapture();
-    currentTime = currentTime.add(const Duration(minutes: 3));
-    await sessionRecorder.resumeCapture();
-    await sessionRecorder.stop();
-
-    final List<String> sessionIds = transport.batches
-        .map((SessionBatch batch) => batch.sessionId)
-        .toSet()
-        .toList(growable: false);
-    final List<String> eventTypes = transport.batches
-        .expand((SessionBatch batch) => batch.events)
-        .map((RecorderEvent event) => event.type)
-        .toList(growable: false);
-
-    expect(sessionIds.length, 2);
-    expect(eventTypes, contains('session.paused'));
-    expect(eventTypes, contains('session.stopped'));
-    expect(
-        eventTypes.where((String type) => type == 'session.started').length, 2);
-
-    await nativeBridge.dispose();
-  });
-
-  test('global recorder pauses and resumes capture from app lifecycle',
-      () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-
-    await recorder.initialize(
-      nativeBridge: nativeBridge,
-      transport: transport,
-      config: const SessionRecorderConfig.lightweight(),
-    );
-
-    recorder.didChangeAppLifecycleState(widgets.AppLifecycleState.paused);
-    await Future<void>.delayed(Duration.zero);
-    expect(nativeBridge.started, isFalse);
-
-    recorder.didChangeAppLifecycleState(widgets.AppLifecycleState.resumed);
-    await Future<void>.delayed(Duration.zero);
-    expect(nativeBridge.started, isTrue);
-
-    await recorder.stop();
-    await nativeBridge.dispose();
-  });
-
-  test('builds a replay document for viewer-side reconstruction', () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-    final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
-      nativeBridge: nativeBridge,
-      transport: transport,
-    );
-
-    await sessionRecorder.start(userId: 'viewer-user');
-    nativeBridge.emit(
-      'screen.view',
-      attributes: <String, Object?>{
-        'screenName': 'Checkout',
-        'properties': <String, Object?>{'source': 'native'},
-      },
-      timestampMs: 1,
-    );
-    nativeBridge.emit(
-      'replay.frame',
-      attributes: <String, Object?>{
-        'metadata': <String, Object?>{
-          'platform': 'ios',
-          'captureStrategy': 'native_view_hierarchy',
-        },
-        'screenName': 'Checkout',
-        'viewport': <String, Object?>{
-          'width': 390,
-          'height': 844,
-          'scale': 3,
-        },
-        'tree': <String, Object?>{
-          'id': 'root',
-          'type': 'UIView',
-          'render': <String, Object?>{
-            'background': <String, Object?>{
-              'type': 'solid',
-              'color': '#FFFFFFFF',
-            },
-          },
-          'children': <Object?>[
-            <String, Object?>{
-              'id': 'title',
-              'type': 'UILabel',
-              'text': 'Checkout',
-              'textStyle': <String, Object?>{
-                'fontSize': 24,
-                'fontWeight': '700',
-                'color': '#FF111111',
-              },
-            },
-          ],
-        },
-      },
-      timestampMs: 2,
-    );
-    sessionRecorder.trackCustomEvent('checkout_started');
-    await Future<void>.delayed(Duration.zero);
-
-    final ReplayDocument? document = sessionRecorder.buildReplayDocument();
-    expect(document, isNotNull);
-    expect(document!.frames, hasLength(1));
-    expect(document.screenViews.single.name, 'Checkout');
-    expect(document.customEvents.single.name, 'checkout_started');
-    expect(document.frames.single.metadata['platform'], 'ios');
-    expect(document.frames.single.viewport['width'], 390);
-    expect(
-      (document.frames.single.tree['children'] as List<Object?>).isNotEmpty,
-      isTrue,
-    );
-
-    await sessionRecorder.stop();
-    await nativeBridge.dispose();
-  });
-
-  test('uploads keyframes separately and stores only frame refs in batches',
-      () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-    final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
-      nativeBridge: nativeBridge,
-      transport: transport,
-    );
-
-    await sessionRecorder.start(userId: 'viewer-user');
-    await sessionRecorder.trackKeyframe(
-      bytes: <int>[1, 2, 3, 4],
-      reason: 'screen_view',
-      screenName: 'Checkout',
-      viewport: <String, Object?>{
-        'width': 390,
-        'height': 844,
-        'devicePixelRatio': 3.0,
-      },
-      metadata: <String, Object?>{
-        'contentHints': <String, Object?>{
-          'texts': <String>['Checkout', 'Pay now'],
-          'images': <Object?>[],
-        },
-        'visualSource': 'flutter_root_capture',
-      },
-    );
-
-    final ReplayDocument? replayDocument =
-        sessionRecorder.buildReplayDocument();
-    expect(replayDocument, isNotNull);
-    expect(replayDocument!.keyframes, hasLength(1));
-    expect(replayDocument.keyframes.single.reason, 'screen_view');
-    expect(replayDocument.keyframes.single.frameRef, 'frame_1_screen_view');
-    expect(
-      replayDocument.sessionContext['device'],
-      containsPair('model', 'iPhone XR'),
-    );
-
-    await sessionRecorder.stop();
-
-    expect(transport.uploadedKeyframes, hasLength(1));
-    expect(
-      transport.uploadedKeyframes.single.upload.bytes,
-      orderedEquals(<int>[1, 2, 3, 4]),
-    );
-
-    final List<RecorderEvent> allEvents = transport.batches
-        .expand((SessionBatch batch) => batch.events)
-        .toList(growable: false);
-    final RecorderEvent keyframeEvent = allEvents.singleWhere(
-      (RecorderEvent event) => event.type == 'replay.keyframe',
-    );
-
-    expect(keyframeEvent.attributes['frameRef'], 'frame_1_screen_view');
-    expect(keyframeEvent.attributes.containsKey('image'), isFalse);
-    expect(keyframeEvent.attributes['screenName'], 'Checkout');
-    expect(nativeBridge.started, isFalse);
-
-    await nativeBridge.dispose();
-  });
-
-  test('stop succeeds while capture is paused', () async {
-    final transport = _FakeTransport();
-    final nativeBridge = _FakeNativeBridge();
-    final sessionRecorder = SessionRecorder(
-      config: const SessionRecorderConfig.lightweight(),
       nativeBridge: nativeBridge,
       transport: transport,
     );
 
     await sessionRecorder.start();
-    await sessionRecorder.pauseCapture();
+    sessionRecorder.trackLog(
+      level: 'warning',
+      logger: 'checkout',
+      message: 'validation failed',
+    );
+    sessionRecorder.trackError(
+      error: StateError('Missing cart id'),
+      logger: 'checkout',
+    );
     await sessionRecorder.stop();
 
     final List<String> eventTypes = transport.batches
         .expand((SessionBatch batch) => batch.events)
         .map((RecorderEvent event) => event.type)
         .toList(growable: false);
-
-    expect(eventTypes, contains('session.paused'));
-    expect(eventTypes, contains('session.stopped'));
-    expect(nativeBridge.started, isFalse);
+    expect(eventTypes, containsAll(<String>['log', 'error']));
 
     await nativeBridge.dispose();
+  });
+
+  test('normalizes non-finite numbers before JSON encoding', () {
+    final event = RecorderEvent(
+      type: 'custom',
+      attributes: <String, Object?>{
+        'name': 'bad_values',
+        'properties': <String, Object?>{
+          'nan': double.nan,
+          'infinity': double.infinity,
+          'valid': 1.5,
+        },
+      },
+    );
+
+    final String encoded = jsonEncode(event.toJson());
+    final Map<String, Object?> decoded =
+        jsonDecode(encoded) as Map<String, Object?>;
+    final attributes = decoded['attributes'] as Map<String, Object?>;
+    final properties = attributes['properties'] as Map<String, Object?>;
+
+    expect(properties['nan'], isNull);
+    expect(properties['infinity'], isNull);
+    expect(properties['valid'], 1.5);
   });
 }

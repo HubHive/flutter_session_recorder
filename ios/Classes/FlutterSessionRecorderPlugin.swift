@@ -3,7 +3,7 @@ import Foundation
 import UIKit
 
 public class FlutterSessionRecorderPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
-  private var captureManager = IOSReplayCaptureManager()
+  private var captureManager = IOSNativeCaptureManager()
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = FlutterSessionRecorderPlugin()
@@ -35,6 +35,12 @@ public class FlutterSessionRecorderPlugin: NSObject, FlutterPlugin, FlutterStrea
     case "stopCapture":
       captureManager.stop()
       result(nil)
+    case "startSnapshotCapture":
+      debugLog("startSnapshotCapture method received")
+      let arguments = call.arguments as? [String: Any] ?? [:]
+      captureManager.startSnapshotCapture(config: arguments, result: result)
+    case "stopSnapshotCapture":
+      captureManager.stopSnapshotCapture(result: result)
     case "getDeviceContext":
       result(deviceContext())
     case "setScreenName":
@@ -47,13 +53,19 @@ public class FlutterSessionRecorderPlugin: NSObject, FlutterPlugin, FlutterStrea
   }
 
   public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    debugLog("event channel attached")
     captureManager.eventSink = events
     return nil
   }
 
   public func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    debugLog("event channel detached")
     captureManager.eventSink = nil
     return nil
+  }
+
+  private func debugLog(_ message: String) {
+    NSLog("[flutter_session_recorder ios] %@", message)
   }
 
   private func deviceContext() -> [String: Any] {
@@ -128,54 +140,313 @@ public class FlutterSessionRecorderPlugin: NSObject, FlutterPlugin, FlutterStrea
   }
 }
 
-private final class IOSReplayCaptureManager: NSObject, UIGestureRecognizerDelegate {
-  var eventSink: FlutterEventSink?
+private final class IOSWindowSnapshotCaptureManager {
+  var eventSink: FlutterEventSink? {
+    didSet {
+      flushPendingEventsIfNeeded()
+    }
+  }
+  var screenNameProvider: (() -> String?)?
 
+  private let snapshotQueue = DispatchQueue(label: "flutter_session_recorder.snapshot")
+  private var isRecording = false
+  private var jpegQuality: CGFloat = 0.65
+  private var maxDimension = 720
+  private var pendingEvents: [[String: Any]] = []
+  private var sequence = 0
+  private var snapshotInterval: TimeInterval = 0.5
+  private var snapshotTimer: DispatchWorkItem?
+
+  func start(config: [String: Any], result: @escaping FlutterResult) {
+    snapshotQueue.async {
+      if self.isRecording {
+        self.debugLog("Window snapshot capture start skipped because capture is already recording")
+        DispatchQueue.main.async { result(nil) }
+        return
+      }
+
+      self.snapshotInterval = max(
+        0.25,
+        config.doubleValue("nativeSnapshotIntervalMs", fallback: 500) / 1000.0
+      )
+      self.jpegQuality = CGFloat(
+        min(0.95, max(0.2, config.doubleValue("nativeSnapshotJpegQuality", fallback: 0.65)))
+      )
+      self.maxDimension = max(
+        240,
+        config.intValue("nativeSnapshotMaxDimension", fallback: 720)
+      )
+      self.sequence = 0
+      self.isRecording = true
+
+      self.debugLog(
+        "Window snapshot capture started: interval=\(self.snapshotInterval)s quality=\(self.jpegQuality) maxDimension=\(self.maxDimension)"
+      )
+      self.emitStatus(
+        phase: "started",
+        message: "Window snapshot capture started.",
+        attributes: [
+          "captureStrategy": "uiwindow_draw_hierarchy",
+          "jpegQuality": Double(self.jpegQuality),
+          "maxDimension": self.maxDimension,
+          "snapshotIntervalMs": Int(self.snapshotInterval * 1000),
+        ]
+      )
+      self.scheduleNextSnapshot()
+      DispatchQueue.main.async { result(nil) }
+    }
+  }
+
+  func stop(completion: @escaping (Error?) -> Void) {
+    snapshotQueue.async {
+      self.isRecording = false
+      self.snapshotTimer?.cancel()
+      self.snapshotTimer = nil
+      completion(nil)
+    }
+  }
+
+  private func scheduleNextSnapshot() {
+    snapshotTimer?.cancel()
+    guard isRecording else { return }
+
+    let workItem = DispatchWorkItem { [weak self] in
+      self?.captureSnapshotFrame()
+    }
+    snapshotTimer = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + snapshotInterval, execute: workItem)
+  }
+
+  private func captureSnapshotFrame() {
+    guard isRecording else { return }
+
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self else { return }
+      guard let image = self.snapshotKeyWindow() else {
+        self.snapshotQueue.async {
+          self.emitStatus(
+            phase: "snapshot_skipped",
+            level: "warning",
+            message: "Unable to snapshot the key window for this frame."
+          )
+          self.scheduleNextSnapshot()
+        }
+        return
+      }
+
+      guard let data = image.jpegData(compressionQuality: self.jpegQuality) else {
+        self.snapshotQueue.async {
+          self.emitStatus(
+            phase: "snapshot_encode_failed",
+            level: "warning",
+            message: "Unable to encode the key window snapshot."
+          )
+          self.scheduleNextSnapshot()
+        }
+        return
+      }
+
+      self.snapshotQueue.async {
+        self.writeSnapshot(data: data, width: Int(image.size.width * image.scale), height: Int(image.size.height * image.scale))
+      }
+    }
+  }
+
+  private func writeSnapshot(data: Data, width: Int, height: Int) {
+    guard isRecording else { return }
+    sequence += 1
+    let timestampMs = Int(Date().timeIntervalSince1970 * 1000)
+    let snapshotId = "ios_\(timestampMs)_\(sequence)"
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "flutter_session_recorder_snapshot_\(UUID().uuidString).jpg"
+    )
+
+    do {
+      try data.write(to: url, options: .atomic)
+      debugLog("Window snapshot ready: id=\(snapshotId) bytes=\(data.count)")
+      emitSnapshotReady(
+        url: url,
+        snapshotId: snapshotId,
+        timestampMs: timestampMs,
+        width: width,
+        height: height,
+        fileSize: data.count
+      )
+    } catch {
+      emitError(error)
+    }
+
+    scheduleNextSnapshot()
+  }
+
+  private func snapshotKeyWindow() -> UIImage? {
+    guard Thread.isMainThread else { return nil }
+    guard let window = keyWindow() else { return nil }
+
+    let captureScale = captureScaleForWindow(window)
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = captureScale
+    format.opaque = window.isOpaque
+    let renderer = UIGraphicsImageRenderer(size: window.bounds.size, format: format)
+    let image = renderer.image { _ in
+      let didDraw = window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+      if !didDraw, let context = UIGraphicsGetCurrentContext() {
+        window.layer.render(in: context)
+      }
+    }
+    return image
+  }
+
+  private func captureScaleForWindow(_ window: UIWindow) -> CGFloat {
+    let longestSide = max(window.bounds.width, window.bounds.height)
+    guard longestSide > 0 else { return window.screen.scale }
+    return min(window.screen.scale, CGFloat(maxDimension) / longestSide)
+  }
+
+  private func keyWindow() -> UIWindow? {
+    if #available(iOS 13.0, *) {
+      return UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .first(where: { $0.activationState == .foregroundActive })?
+        .windows
+        .first(where: \.isKeyWindow)
+    }
+    return UIApplication.shared.keyWindow
+  }
+
+  private func emitSnapshotReady(
+    url: URL,
+    snapshotId: String,
+    timestampMs: Int,
+    width: Int,
+    height: Int,
+    fileSize: Int
+  ) {
+    let baseAttributes: [String: Any] = [
+      "captureStrategy": "uiwindow_draw_hierarchy",
+      "contentType": "image/jpeg",
+      "filePath": url.path,
+      "fileSize": fileSize,
+      "format": "jpg",
+      "height": height,
+      "snapshotId": snapshotId,
+      "sequence": sequence,
+      "timestampMs": timestampMs,
+      "width": width,
+    ]
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self else { return }
+      var eventAttributes = baseAttributes
+      if let screenName = self.screenNameProvider?() {
+        eventAttributes["screenName"] = screenName
+      }
+      self.emitEvent(
+        type: "replay.snapshot.ready",
+        timestampMs: timestampMs,
+        attributes: eventAttributes
+      )
+    }
+  }
+
+  private func emitError(_ error: Error) {
+    debugLog("Window snapshot capture error: \(error.localizedDescription)")
+    emitEvent(type: "native.snapshot_capture.error", attributes: [
+      "message": error.localizedDescription,
+      "platform": "ios",
+    ])
+  }
+
+  private func emitStatus(
+    phase: String,
+    level: String = "info",
+    message: String,
+    attributes: [String: Any] = [:]
+  ) {
+    var eventAttributes = attributes
+    eventAttributes["level"] = level
+    eventAttributes["message"] = message
+    eventAttributes["phase"] = phase
+    eventAttributes["platform"] = "ios"
+    emitEvent(type: "native.snapshot_capture.status", attributes: eventAttributes)
+  }
+
+  private func debugLog(_ message: String) {
+    NSLog("[flutter_session_recorder ios] %@", message)
+  }
+
+  private func emitEvent(
+    type: String,
+    timestampMs: Int = Int(Date().timeIntervalSince1970 * 1000),
+    attributes: [String: Any]
+  ) {
+    DispatchQueue.main.async {
+      let payload: [String: Any] = [
+        "id": UUID().uuidString,
+        "type": type,
+        "timestampMs": timestampMs,
+        "attributes": attributes,
+      ]
+      guard let sink = self.eventSink else {
+        self.pendingEvents.append(payload)
+        self.debugLog("Queueing native event until event sink attaches: \(type)")
+        return
+      }
+      sink(payload)
+    }
+  }
+
+  private func flushPendingEventsIfNeeded() {
+    guard let sink = eventSink, !pendingEvents.isEmpty else { return }
+    let events = pendingEvents
+    pendingEvents.removeAll()
+    debugLog("Flushing \(events.count) queued native snapshot event(s)")
+    DispatchQueue.main.async {
+      events.forEach { sink($0) }
+    }
+  }
+}
+
+private final class IOSNativeCaptureManager: NSObject, UIGestureRecognizerDelegate {
+  var eventSink: FlutterEventSink? {
+    didSet {
+      snapshotCaptureManager.eventSink = eventSink
+    }
+  }
+
+  private let snapshotCaptureManager = IOSWindowSnapshotCaptureManager()
   private var captureNativeLifecycle = true
-  private var captureNativeViewHierarchy = true
   private var captureScrolls = true
   private var captureTaps = true
   private var flutterScreenName: String?
   private var isStarted = false
   private var lastScreenName: String?
-  private var maskAllText = false
-  private var maskTextInputs = true
   private var minimumScrollDelta: CGFloat = 24
   private var panRecognizer: UIPanGestureRecognizer?
-  private var snapshotInterval: TimeInterval = 0.7
   private var tapRecognizer: UITapGestureRecognizer?
-  private var timer: Timer?
 
   func start(config: [String: Any]) {
     captureNativeLifecycle = config.boolValue("captureNativeLifecycle", fallback: true)
-    captureNativeViewHierarchy = config.boolValue("captureNativeViewHierarchy", fallback: true)
     captureScrolls = config.boolValue("captureScrolls", fallback: true)
     captureTaps = config.boolValue("captureTaps", fallback: true)
-    maskAllText = config.boolValue("maskAllText", fallback: false)
-    maskTextInputs = config.boolValue("maskTextInputs", fallback: true)
     minimumScrollDelta = CGFloat(config.doubleValue("minimumScrollDelta", fallback: 24))
-    snapshotInterval = TimeInterval(config.doubleValue("nativeViewTreeSnapshotIntervalMs", fallback: 700) / 1000.0)
     isStarted = true
 
     registerLifecycleObservers()
     attachGestureRecognizersIfNeeded()
-    startTimer()
-    emitScreenAndFrame(reason: "start")
+    emitScreenView(reason: "start")
   }
 
   func stop() {
     isStarted = false
     flutterScreenName = nil
-    timer?.invalidate()
-    timer = nil
+    snapshotCaptureManager.stop { _ in }
     NotificationCenter.default.removeObserver(self)
     detachGestureRecognizers()
   }
 
   func pause() {
     guard isStarted else { return }
-    timer?.invalidate()
-    timer = nil
+    snapshotCaptureManager.stop { _ in }
     detachGestureRecognizers()
   }
 
@@ -186,20 +457,32 @@ private final class IOSReplayCaptureManager: NSObject, UIGestureRecognizerDelega
     }
 
     captureNativeLifecycle = config.boolValue("captureNativeLifecycle", fallback: captureNativeLifecycle)
-    captureNativeViewHierarchy = config.boolValue("captureNativeViewHierarchy", fallback: captureNativeViewHierarchy)
     captureScrolls = config.boolValue("captureScrolls", fallback: captureScrolls)
     captureTaps = config.boolValue("captureTaps", fallback: captureTaps)
-    snapshotInterval = TimeInterval(config.doubleValue("nativeViewTreeSnapshotIntervalMs", fallback: snapshotInterval * 1000) / 1000.0)
     attachGestureRecognizersIfNeeded()
-    startTimer()
-    emitScreenAndFrame(reason: "resume_capture")
+    emitScreenView(reason: "resume_capture")
   }
 
-  private func startTimer() {
-    timer?.invalidate()
-    guard captureNativeViewHierarchy else { return }
-    timer = Timer.scheduledTimer(withTimeInterval: snapshotInterval, repeats: true) { [weak self] _ in
-      self?.emitScreenAndFrame(reason: "interval")
+  func startSnapshotCapture(config: [String: Any], result: @escaping FlutterResult) {
+    snapshotCaptureManager.screenNameProvider = { [weak self] in
+      self?.currentScreenName()
+    }
+    snapshotCaptureManager.start(config: config, result: result)
+  }
+
+  func stopSnapshotCapture(result: @escaping FlutterResult) {
+    snapshotCaptureManager.stop { error in
+      DispatchQueue.main.async {
+        if let error = error {
+          result(FlutterError(
+            code: "SNAPSHOT_CAPTURE_STOP_FAILED",
+            message: error.localizedDescription,
+            details: nil
+          ))
+          return
+        }
+        result(nil)
+      }
     }
   }
 
@@ -220,18 +503,20 @@ private final class IOSReplayCaptureManager: NSObject, UIGestureRecognizerDelega
   }
 
   @objc private func appDidBecomeActive() {
-    emitEvent(type: "native.lifecycle", attributes: [
+    var attributes: [String: Any] = [
       "state": "resumed",
-      "screenName": currentScreenName() as Any,
-    ])
-    emitScreenAndFrame(reason: "resume")
+    ]
+    addCurrentScreenName(to: &attributes)
+    emitEvent(type: "native.lifecycle", attributes: attributes)
+    emitScreenView(reason: "resume")
   }
 
   @objc private func appWillResignActive() {
-    emitEvent(type: "native.lifecycle", attributes: [
+    var attributes: [String: Any] = [
       "state": "paused",
-      "screenName": currentScreenName() as Any,
-    ])
+    ]
+    addCurrentScreenName(to: &attributes)
+    emitEvent(type: "native.lifecycle", attributes: attributes)
   }
 
   private func attachGestureRecognizersIfNeeded() {
@@ -267,11 +552,12 @@ private final class IOSReplayCaptureManager: NSObject, UIGestureRecognizerDelega
 
   @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
     let point = recognizer.location(in: recognizer.view)
-    emitEvent(type: "interaction.tap", attributes: [
+    var attributes: [String: Any] = [
       "dx": point.x,
       "dy": point.y,
-      "screenName": currentScreenName() as Any,
-    ])
+    ]
+    addCurrentScreenName(to: &attributes)
+    emitEvent(type: "interaction.tap", attributes: attributes)
   }
 
   @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
@@ -279,237 +565,39 @@ private final class IOSReplayCaptureManager: NSObject, UIGestureRecognizerDelega
     if abs(translation.y) < minimumScrollDelta && abs(translation.x) < minimumScrollDelta {
       return
     }
-    emitEvent(type: "interaction.scroll", attributes: [
+    var attributes: [String: Any] = [
       "axis": abs(translation.y) >= abs(translation.x) ? "vertical" : "horizontal",
       "dx": translation.x,
       "dy": translation.y,
-      "screenName": currentScreenName() as Any,
-    ])
+    ]
+    addCurrentScreenName(to: &attributes)
+    emitEvent(type: "interaction.scroll", attributes: attributes)
     recognizer.setTranslation(.zero, in: recognizer.view)
   }
 
-  private func emitScreenAndFrame(reason: String) {
+  private func emitScreenView(reason: String) {
     let screenName = currentScreenName()
     if screenName != lastScreenName {
       lastScreenName = screenName
-      emitEvent(type: "screen.view", attributes: [
-        "screenName": screenName as Any,
+      var attributes: [String: Any] = [
         "properties": [
           "source": "ios_native",
           "reason": reason,
         ],
-      ])
-    }
-
-    guard captureNativeViewHierarchy, let window = keyWindow() else { return }
-    emitEvent(type: "replay.frame", attributes: [
-      "screenName": screenName as Any,
-      "metadata": [
-        "platform": "ios",
-        "reason": reason,
-        "captureStrategy": "native_view_hierarchy",
-      ],
-      "viewport": buildViewport(window: window),
-      "tree": buildNode(view: window),
-    ])
-  }
-
-  private func buildNode(view: UIView) -> [String: Any] {
-    let frame = view.convert(view.bounds, to: nil)
-    var node: [String: Any] = [
-      "id": String(ObjectIdentifier(view).hashValue),
-      "type": String(describing: type(of: view)),
-      "alpha": view.alpha,
-      "bounds": [
-        "x": frame.origin.x,
-        "y": frame.origin.y,
-        "width": frame.size.width,
-        "height": frame.size.height,
-      ],
-      "enabled": view.isUserInteractionEnabled,
-      "hidden": view.isHidden,
-      "padding": [
-        "left": 0,
-        "top": 0,
-        "right": 0,
-        "bottom": 0,
-      ],
-      "render": buildRenderProperties(view: view),
-      "scrollable": view is UIScrollView,
-      "transform": [
-        "rotation": atan2(view.transform.b, view.transform.a),
-        "scaleX": sqrt((view.transform.a * view.transform.a) + (view.transform.c * view.transform.c)),
-        "scaleY": sqrt((view.transform.b * view.transform.b) + (view.transform.d * view.transform.d)),
-        "translationX": view.transform.tx,
-        "translationY": view.transform.ty,
-      ],
-    ]
-
-    if let control = view as? UIControl {
-      node["selected"] = control.isSelected
-      node["highlighted"] = control.isHighlighted
-      node["enabled"] = control.isEnabled
-    }
-
-    if let label = view as? UILabel {
-      node["text"] = maskAllText ? "•••" : label.text
-      node["textStyle"] = buildTextStyle(
-        color: label.textColor,
-        font: label.font,
-        alignment: label.textAlignment,
-        lineBreakMode: label.lineBreakMode,
-        numberOfLines: label.numberOfLines
-      )
-    } else if let textView = view as? UITextView {
-      node["text"] = (maskAllText || maskTextInputs) ? "•••" : textView.text
-      node["textStyle"] = buildTextStyle(
-        color: textView.textColor,
-        font: textView.font,
-        alignment: textView.textAlignment,
-        lineBreakMode: textView.textContainer.lineBreakMode,
-        numberOfLines: 0
-      )
-      node["contentOffset"] = [
-        "x": textView.contentOffset.x,
-        "y": textView.contentOffset.y,
       ]
-    } else if view is UITextField {
-      node["text"] = "•••"
-      if let textField = view as? UITextField {
-        node["hint"] = maskTextInputs ? "•••" : textField.placeholder
-        node["textStyle"] = buildTextStyle(
-          color: textField.textColor,
-          font: textField.font,
-          alignment: textField.textAlignment,
-          lineBreakMode: .byTruncatingTail,
-          numberOfLines: 1
-        )
+      if let screenName {
+        attributes["screenName"] = screenName
       }
+      emitEvent(type: "screen.view", attributes: attributes)
     }
 
-    if let button = view as? UIButton {
-      node["text"] = maskAllText ? "•••" : button.title(for: .normal)
-      node["textStyle"] = buildTextStyle(
-        color: button.titleColor(for: .normal),
-        font: button.titleLabel?.font,
-        alignment: button.titleLabel?.textAlignment ?? .center,
-        lineBreakMode: button.titleLabel?.lineBreakMode ?? .byTruncatingTail,
-        numberOfLines: button.titleLabel?.numberOfLines ?? 1
-      )
-    }
-
-    if let imageView = view as? UIImageView {
-      node["image"] = [
-        "contentMode": contentModeName(imageView.contentMode),
-        "hasImage": imageView.image != nil,
-        "tintColor": colorToHex(imageView.tintColor),
-      ]
-    }
-
-    if let control = view as? UISwitch {
-      node["checked"] = control.isOn
-    }
-
-    if let slider = view as? UISlider {
-      node["progress"] = [
-        "minimum": slider.minimumValue,
-        "maximum": slider.maximumValue,
-        "value": slider.value,
-      ]
-    }
-
-    if let progress = view as? UIProgressView {
-      node["progress"] = [
-        "minimum": 0,
-        "maximum": 1,
-        "value": progress.progress,
-      ]
-    }
-
-    if !view.subviews.isEmpty {
-      node["children"] = view.subviews.enumerated().map { index, child in
-        var childNode = buildNode(view: child)
-        childNode["childIndex"] = index
-        return childNode
-      }
-    }
-
-    if let scrollView = view as? UIScrollView {
-      node["contentOffset"] = [
-        "x": scrollView.contentOffset.x,
-        "y": scrollView.contentOffset.y,
-      ]
-      node["contentSize"] = [
-        "width": scrollView.contentSize.width,
-        "height": scrollView.contentSize.height,
-      ]
-      node["contentInset"] = [
-        "top": scrollView.contentInset.top,
-        "left": scrollView.contentInset.left,
-        "bottom": scrollView.contentInset.bottom,
-        "right": scrollView.contentInset.right,
-      ]
-    }
-
-    return node
+    return
   }
 
-  private func buildViewport(window: UIWindow) -> [String: Any] {
-    let safeArea = window.safeAreaInsets
-    return [
-      "width": window.bounds.width,
-      "height": window.bounds.height,
-      "scale": window.screen.scale,
-      "safeAreaInsets": [
-        "top": safeArea.top,
-        "left": safeArea.left,
-        "bottom": safeArea.bottom,
-        "right": safeArea.right,
-      ],
-    ]
-  }
-
-  private func buildRenderProperties(view: UIView) -> [String: Any] {
-    var render: [String: Any] = [
-      "background": [
-        "type": "solid",
-        "color": colorToHex(view.backgroundColor),
-      ],
-      "clipsToBounds": view.clipsToBounds,
-      "cornerRadius": view.layer.cornerRadius,
-      "borderWidth": view.layer.borderWidth,
-      "borderColor": colorToHex(UIColor(cgColor: view.layer.borderColor ?? UIColor.clear.cgColor)),
-    ]
-
-    if let stackView = view as? UIStackView {
-      render["stack"] = [
-        "axis": stackView.axis == .vertical ? "vertical" : "horizontal",
-        "alignment": stackAlignmentName(stackView.alignment),
-        "distribution": stackDistributionName(stackView.distribution),
-        "spacing": stackView.spacing,
-      ]
+  private func addCurrentScreenName(to attributes: inout [String: Any]) {
+    if let screenName = currentScreenName() {
+      attributes["screenName"] = screenName
     }
-
-    return render
-  }
-
-  private func buildTextStyle(
-    color: UIColor?,
-    font: UIFont?,
-    alignment: NSTextAlignment,
-    lineBreakMode: NSLineBreakMode,
-    numberOfLines: Int
-  ) -> [String: Any] {
-    return [
-      "alignment": textAlignmentName(alignment),
-      "color": colorToHex(color),
-      "fontFamily": font?.familyName as Any,
-      "fontName": font?.fontName as Any,
-      "fontSize": font?.pointSize as Any,
-      "fontWeight": fontWeightName(font),
-      "lineBreakMode": lineBreakModeName(lineBreakMode),
-      "numberOfLines": numberOfLines,
-    ]
   }
 
   private func emitEvent(type: String, attributes: [String: Any]) {
@@ -574,6 +662,16 @@ private extension Dictionary where Key == String, Value == Any {
     return self[key] as? Bool ?? fallback
   }
 
+  func intValue(_ key: String, fallback: Int) -> Int {
+    if let value = self[key] as? Int {
+      return value
+    }
+    if let value = self[key] as? Double {
+      return Int(value)
+    }
+    return fallback
+  }
+
   func doubleValue(_ key: String, fallback: Double) -> Double {
     if let value = self[key] as? Double {
       return value
@@ -585,121 +683,8 @@ private extension Dictionary where Key == String, Value == Any {
   }
 }
 
-private func colorToHex(_ color: UIColor?) -> String? {
-  guard let color else { return nil }
-  var red: CGFloat = 0
-  var green: CGFloat = 0
-  var blue: CGFloat = 0
-  var alpha: CGFloat = 0
-  guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
-    return nil
-  }
-  return String(
-    format: "#%02X%02X%02X%02X",
-    Int(round(alpha * 255)),
-    Int(round(red * 255)),
-    Int(round(green * 255)),
-    Int(round(blue * 255))
-  )
-}
-
-private func textAlignmentName(_ alignment: NSTextAlignment) -> String {
-  switch alignment {
-  case .center:
-    return "center"
-  case .right:
-    return "end"
-  case .justified:
-    return "justified"
-  default:
-    return "start"
-  }
-}
-
-private func lineBreakModeName(_ mode: NSLineBreakMode) -> String {
-  switch mode {
-  case .byClipping:
-    return "clip"
-  case .byTruncatingHead:
-    return "truncate_head"
-  case .byTruncatingMiddle:
-    return "truncate_middle"
-  case .byTruncatingTail:
-    return "truncate_tail"
-  case .byWordWrapping:
-    return "word_wrap"
-  default:
-    return "char_wrap"
-  }
-}
-
-private func fontWeightName(_ font: UIFont?) -> String {
-  guard let descriptor = font?.fontDescriptor else { return "400" }
-  let traits = descriptor.object(forKey: .traits) as? [UIFontDescriptor.TraitKey: Any]
-  let weight = (traits?[.weight] as? CGFloat) ?? 0
-  switch weight {
-  case ..<(-0.4):
-    return "300"
-  case ..<0.15:
-    return "400"
-  case ..<0.3:
-    return "500"
-  case ..<0.4:
-    return "600"
-  default:
-    return "700"
-  }
-}
-
 private extension String {
   var nonEmptyValue: String? {
     isEmpty ? nil : self
-  }
-}
-
-private func contentModeName(_ mode: UIView.ContentMode) -> String {
-  switch mode {
-  case .scaleAspectFit:
-    return "aspect_fit"
-  case .scaleAspectFill:
-    return "aspect_fill"
-  case .scaleToFill:
-    return "fill"
-  case .center:
-    return "center"
-  default:
-    return "other"
-  }
-}
-
-private func stackAlignmentName(_ alignment: UIStackView.Alignment) -> String {
-  switch alignment {
-  case .center:
-    return "center"
-  case .leading, .top:
-    return "start"
-  case .trailing, .bottom:
-    return "end"
-  case .fill:
-    return "fill"
-  default:
-    return "first_baseline"
-  }
-}
-
-private func stackDistributionName(_ distribution: UIStackView.Distribution) -> String {
-  switch distribution {
-  case .fill:
-    return "fill"
-  case .fillEqually:
-    return "fill_equally"
-  case .fillProportionally:
-    return "fill_proportionally"
-  case .equalSpacing:
-    return "equal_spacing"
-  case .equalCentering:
-    return "equal_centering"
-  @unknown default:
-    return "unknown"
   }
 }
