@@ -497,7 +497,7 @@ void main() {
     await nativeBridge.dispose();
   });
 
-  test('native visual capture status events are recorded as logs', () async {
+  test('native visual capture status events are ignored', () async {
     final transport = _FakeTransport();
     final nativeBridge = _FakeNativeBridge();
 
@@ -518,19 +518,13 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     await recorder.stop();
 
-    final RecorderEvent logEvent = transport.batches
-        .expand((SessionBatch batch) => batch.events)
-        .singleWhere(
-          (RecorderEvent event) =>
-              event.type == 'log' &&
-              event.attributes['logger'] == 'native_snapshot_capture' &&
-              event.attributes['message'] == 'Window snapshot captured.',
-        );
-
-    expect(
-      logEvent.attributes['properties'],
-      containsPair('phase', 'snapshot_captured'),
-    );
+    final Iterable<RecorderEvent> nativeStatusLogs =
+        transport.batches.expand((SessionBatch batch) => batch.events).where(
+              (RecorderEvent event) =>
+                  event.type == 'log' &&
+                  event.attributes['logger'] == 'native_snapshot_capture',
+            );
+    expect(nativeStatusLogs, isEmpty);
 
     await nativeBridge.dispose();
   });

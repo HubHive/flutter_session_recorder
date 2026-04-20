@@ -208,10 +208,6 @@ class Recorder with widgets.WidgetsBindingObserver {
           _sessionRecorder.isRecordingAccessDenied) {
         return;
       }
-      debugPrint(
-        '[flutter_session_recorder] Starting native visual capture after '
-        'the first Flutter frame',
-      );
       unawaited(_sessionRecorder.startSnapshotCapture());
     });
     widgets.WidgetsBinding.instance.ensureVisualUpdate();

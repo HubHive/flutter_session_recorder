@@ -45,7 +45,6 @@ class SessionRecorder {
   final List<ScreenViewListener> _screenViewListeners = <ScreenViewListener>[];
 
   Timer? _flushTimer;
-  Timer? _nativeSnapshotFirstSignalTimer;
   Timer? _recordingAccessCheckTimer;
   Timer? _snapshotUploadTimer;
   StreamSubscription<Map<String, Object?>>? _nativeEventSubscription;
@@ -167,8 +166,6 @@ class SessionRecorder {
 
     _flushTimer?.cancel();
     _flushTimer = null;
-    _nativeSnapshotFirstSignalTimer?.cancel();
-    _nativeSnapshotFirstSignalTimer = null;
     _recordingAccessCheckTimer?.cancel();
     _recordingAccessCheckTimer = null;
     await _stopNativeCapture();
@@ -1146,21 +1143,10 @@ class SessionRecorder {
     );
     final int? timestampMs = event['timestampMs'] as int?;
     if (type == 'replay.snapshot.ready') {
-      _nativeSnapshotFirstSignalTimer?.cancel();
-      _nativeSnapshotFirstSignalTimer = null;
-      debugPrint(
-        '[flutter_session_recorder] Native snapshot is ready for upload',
-      );
       unawaited(_handleNativeSnapshot(attributes, timestampMs));
       return;
     }
     if (type == 'native.snapshot_capture.error') {
-      _nativeSnapshotFirstSignalTimer?.cancel();
-      _nativeSnapshotFirstSignalTimer = null;
-      debugPrint(
-        '[flutter_session_recorder] Native visual capture error: '
-        '${attributes['message']}',
-      );
       trackError(
         error: attributes['message'] ?? 'Native visual capture error',
         logger: 'native_snapshot_capture',
@@ -1169,22 +1155,6 @@ class SessionRecorder {
       return;
     }
     if (type == 'native.snapshot_capture.status') {
-      final String? phase = attributes['phase']?.toString();
-      if (phase != 'started') {
-        _nativeSnapshotFirstSignalTimer?.cancel();
-        _nativeSnapshotFirstSignalTimer = null;
-      }
-      debugPrint(
-        '[flutter_session_recorder] Native visual capture status: '
-        '${phase ?? 'unknown'} - ${attributes['message']}',
-      );
-      trackLog(
-        level: attributes['level']?.toString() ?? 'info',
-        logger: 'native_snapshot_capture',
-        message: attributes['message']?.toString() ??
-            'Native visual capture status changed',
-        properties: attributes,
-      );
       return;
     }
     if (!_isSupportedNativeEventType(type)) {
@@ -1250,7 +1220,8 @@ class SessionRecorder {
         'captureStrategy':
             attributes['captureStrategy']?.toString() ?? 'native_snapshot',
         'fileSize': attributes['fileSize'],
-        'platform': 'ios',
+        'platform':
+            attributes['platform']?.toString() ?? defaultTargetPlatform.name,
         'sequence': attributes['sequence'],
       },
     );
@@ -1258,30 +1229,8 @@ class SessionRecorder {
 
   Future<void> _startNativeSnapshotCapture() async {
     try {
-      debugPrint(
-        '[flutter_session_recorder] Starting native visual capture '
-        '(${defaultTargetPlatform.name}, '
-        '${config.nativeSnapshotInterval.inMilliseconds}ms snapshots)',
-      );
-      _startNativeSnapshotFirstSignalTimer();
       await _nativeBridge.startSnapshotCapture(config);
-      debugPrint(
-        '[flutter_session_recorder] Native visual capture start completed',
-      );
-      trackLog(
-        logger: 'native_snapshot_capture',
-        message: 'Native visual capture start completed',
-        properties: <String, Object?>{
-          'maxDimension': config.nativeSnapshotMaxDimension,
-          'platform': defaultTargetPlatform.name,
-          'snapshotIntervalMs': config.nativeSnapshotInterval.inMilliseconds,
-        },
-      );
     } catch (error, stackTrace) {
-      debugPrint(
-        '[flutter_session_recorder] Native visual capture failed to start: '
-        '$error',
-      );
       trackError(
         error: error,
         stackTrace: stackTrace,
@@ -1303,23 +1252,7 @@ class SessionRecorder {
     }
   }
 
-  void _startNativeSnapshotFirstSignalTimer() {
-    _nativeSnapshotFirstSignalTimer?.cancel();
-    _nativeSnapshotFirstSignalTimer = Timer(const Duration(seconds: 2), () {
-      if (!isRecording || _isCapturePaused || _isRecordingAccessDenied) {
-        return;
-      }
-      debugPrint(
-        '[flutter_session_recorder] Native visual capture started, but no '
-        'snapshot events have been received yet. If this persists, '
-        'the native visual capture path is not producing snapshots.',
-      );
-    });
-  }
-
   Future<void> _stopNativeSnapshotCapture() async {
-    _nativeSnapshotFirstSignalTimer?.cancel();
-    _nativeSnapshotFirstSignalTimer = null;
     try {
       await _nativeBridge.stopSnapshotCapture();
     } catch (error, stackTrace) {

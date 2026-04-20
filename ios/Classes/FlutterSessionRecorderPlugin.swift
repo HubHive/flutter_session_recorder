@@ -36,7 +36,6 @@ public class FlutterSessionRecorderPlugin: NSObject, FlutterPlugin, FlutterStrea
       captureManager.stop()
       result(nil)
     case "startSnapshotCapture":
-      debugLog("startSnapshotCapture method received")
       let arguments = call.arguments as? [String: Any] ?? [:]
       captureManager.startSnapshotCapture(config: arguments, result: result)
     case "stopSnapshotCapture":
@@ -53,19 +52,13 @@ public class FlutterSessionRecorderPlugin: NSObject, FlutterPlugin, FlutterStrea
   }
 
   public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-    debugLog("event channel attached")
     captureManager.eventSink = events
     return nil
   }
 
   public func onCancel(withArguments arguments: Any?) -> FlutterError? {
-    debugLog("event channel detached")
     captureManager.eventSink = nil
     return nil
-  }
-
-  private func debugLog(_ message: String) {
-    NSLog("[flutter_session_recorder ios] %@", message)
   }
 
   private func deviceContext() -> [String: Any] {
@@ -160,7 +153,6 @@ private final class IOSWindowSnapshotCaptureManager {
   func start(config: [String: Any], result: @escaping FlutterResult) {
     snapshotQueue.async {
       if self.isRecording {
-        self.debugLog("Window snapshot capture start skipped because capture is already recording")
         DispatchQueue.main.async { result(nil) }
         return
       }
@@ -179,9 +171,6 @@ private final class IOSWindowSnapshotCaptureManager {
       self.sequence = 0
       self.isRecording = true
 
-      self.debugLog(
-        "Window snapshot capture started: interval=\(self.snapshotInterval)s quality=\(self.jpegQuality) maxDimension=\(self.maxDimension)"
-      )
       self.emitStatus(
         phase: "started",
         message: "Window snapshot capture started.",
@@ -263,7 +252,6 @@ private final class IOSWindowSnapshotCaptureManager {
 
     do {
       try data.write(to: url, options: .atomic)
-      debugLog("Window snapshot ready: id=\(snapshotId) bytes=\(data.count)")
       emitSnapshotReady(
         url: url,
         snapshotId: snapshotId,
@@ -329,6 +317,7 @@ private final class IOSWindowSnapshotCaptureManager {
       "fileSize": fileSize,
       "format": "jpg",
       "height": height,
+      "platform": "ios",
       "snapshotId": snapshotId,
       "sequence": sequence,
       "timestampMs": timestampMs,
@@ -349,7 +338,6 @@ private final class IOSWindowSnapshotCaptureManager {
   }
 
   private func emitError(_ error: Error) {
-    debugLog("Window snapshot capture error: \(error.localizedDescription)")
     emitEvent(type: "native.snapshot_capture.error", attributes: [
       "message": error.localizedDescription,
       "platform": "ios",
@@ -370,10 +358,6 @@ private final class IOSWindowSnapshotCaptureManager {
     emitEvent(type: "native.snapshot_capture.status", attributes: eventAttributes)
   }
 
-  private func debugLog(_ message: String) {
-    NSLog("[flutter_session_recorder ios] %@", message)
-  }
-
   private func emitEvent(
     type: String,
     timestampMs: Int = Int(Date().timeIntervalSince1970 * 1000),
@@ -388,7 +372,6 @@ private final class IOSWindowSnapshotCaptureManager {
       ]
       guard let sink = self.eventSink else {
         self.pendingEvents.append(payload)
-        self.debugLog("Queueing native event until event sink attaches: \(type)")
         return
       }
       sink(payload)
@@ -399,7 +382,6 @@ private final class IOSWindowSnapshotCaptureManager {
     guard let sink = eventSink, !pendingEvents.isEmpty else { return }
     let events = pendingEvents
     pendingEvents.removeAll()
-    debugLog("Flushing \(events.count) queued native snapshot event(s)")
     DispatchQueue.main.async {
       events.forEach { sink($0) }
     }

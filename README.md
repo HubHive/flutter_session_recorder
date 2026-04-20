@@ -6,11 +6,11 @@ A Flutter session replay SDK built around a single visual mode: native visual sn
 - native snapshots uploaded to `/snapshots`
 - structured screen, tap, scroll, lifecycle, log, error, and custom events
 - session/user APIs that do not require passing recorder instances around
-- no schematic reconstruction, screen-recording prompts, or replay asset uploads
+- no schematic reconstruction, screen-recording permission prompts, video encoding, or replay asset uploads
 
 ## Architecture
 
-The visual truth source is native snapshot capture. The SDK uploads compressed visual keyframes separately from JSON session batches. The event timeline stores `replay.snapshot` references plus metadata, then overlays structured events during playback.
+The visual truth source is native snapshot capture. The SDK uploads compressed snapshots separately from JSON session batches. The event timeline stores `replay.snapshot` references plus metadata, then overlays structured events during playback.
 
 Structured events include:
 
@@ -59,7 +59,11 @@ MaterialApp(
 
 ## Snapshot Uploads
 
-Native snapshot capture is the only visual mode. On iOS this snapshots the visible key `UIWindow` with `drawHierarchy(in:afterScreenUpdates:)`, falls back to `layer.render(in:)` when needed, uploads compressed JPEG snapshots to `/snapshots`, and then sends lightweight `replay.snapshot` timeline events that reference the uploaded snapshot. This avoids user permission prompts and avoids continuous media encoding on-device.
+Native snapshot capture is the only visual mode. On iOS this snapshots the visible key `UIWindow` with `drawHierarchy(in:afterScreenUpdates:)`, falls back to `layer.render(in:)` when needed, uploads compressed JPEG snapshots to `/snapshots`, and then sends lightweight `replay.snapshot` timeline events that reference the uploaded snapshot.
+
+On Android, the plugin prefers the Flutter render surface instead of a generic view-tree draw. It captures visible Flutter `SurfaceView` content with `PixelCopy` on API 26+, captures Flutter `TextureView` content with `TextureView.getBitmap(...)`, and only then falls back to active-window `PixelCopy` or decor-view drawing. This keeps the public API permission-free while avoiding the black snapshot problem caused by drawing GPU-backed Flutter surfaces as ordinary Android views.
+
+This avoids screen-recording permission prompts and avoids continuous media encoding on-device. The tradeoff is that snapshots are periodic still images, not a true OS-level video stream.
 
 Snapshots are batched before upload to reduce server request volume. By default the SDK uploads up to 10 snapshots per `/snapshots` request, or flushes the pending snapshot batch every 5 seconds. A public `recorder.flush()` also flushes pending snapshots before sending the JSON event batch.
 
@@ -84,7 +88,7 @@ The server should return either `{"snapshots":[{"snapshotId":"...","snapshotRef"
 
 The same session and user metadata is also included on the multipart `/snapshots` upload so the server can associate snapshot blobs without waiting for or joining against a later `/sessions` batch.
 
-Android native visual capture is currently a no-op while the iOS path is validated.
+Android and iOS both emit the same `replay.snapshot.ready` native event shape, so the Dart upload/batching path is shared across platforms. Internal native capture status logs are not printed by default; only capture failures are recorded as structured `error` events.
 
 ## Identity
 

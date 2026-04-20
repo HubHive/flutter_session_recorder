@@ -1,6 +1,6 @@
 name: flutter_session_recorder
 description: Lightweight Flutter session replay plugin with native visual snapshots, batched uploads, interaction telemetry, logs, errors, and custom events.
-version: 0.2.0
+version: 1.0.0
 homepage: https://hubhive.dev
 repository: https://github.com/HubHive/flutter_session_recorder
 

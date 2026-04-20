@@ -1,7 +1,8 @@
-## 0.2.0
+## 1.0.0
 
 - Makes native snapshots the only visual replay mode.
 - Adds iOS no-permission `UIWindow` snapshot capture using `drawHierarchy(in:afterScreenUpdates:)` with `layer.render(in:)` fallback.
+- Adds Android no-permission Flutter surface snapshots using `PixelCopy` for `SurfaceView`, `TextureView.getBitmap(...)` for `TextureView`, and window/decor-view fallbacks.
 - Uploads JPEG snapshots to `/snapshots` and emits `replay.snapshot` timeline references.
 - Batches native snapshot uploads by count, byte size, or flush interval to reduce request volume.
 - Adds `maxSnapshotUploadBatchSize`, `maxSnapshotUploadBatchBytes`, and `snapshotUploadFlushInterval` config options.
@@ -9,6 +10,7 @@
 - Stops sending schematic frames, screenshot keyframes, replay assets, and legacy visual upload routes.
 - Keeps structured metadata events for screen views, taps, scrolls, lifecycle, logs, errors, custom events, session context, session properties, and user data.
 - Keeps recording access control behavior: `403 Forbidden` pauses recording and `/recording-access-test` can resume it.
+- Removes noisy internal native capture debug logging while preserving structured native capture error events.
 
 ## 0.1.1
 
