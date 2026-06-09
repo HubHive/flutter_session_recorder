@@ -1,3 +1,6 @@
+## 1.0.2
+- Updated podspec
+
 ## 1.0.1
 
 - Fixes scroll jitter on ProMotion (120Hz) iPhones caused by per-snapshot main-thread work.
