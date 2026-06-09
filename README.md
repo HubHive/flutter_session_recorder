@@ -31,7 +31,7 @@ The viewer should show the latest snapshot as the primary visual layer until the
 await recorder.runApp(
   const MyApp(),
   config: const SessionRecorderConfig.lightweight(
-    nativeSnapshotInterval: Duration(milliseconds: 500),
+    nativeSnapshotInterval: Duration(milliseconds: 1000),
     nativeSnapshotJpegQuality: 0.65,
     nativeSnapshotMaxDimension: 720,
     maxSnapshotUploadBatchSize: 10,

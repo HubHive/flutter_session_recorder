@@ -1,3 +1,9 @@
+## 1.1.0
+
+- Fixes scroll jitter on ProMotion (120Hz) iPhones caused by per-snapshot main-thread work.
+- Moves iOS JPEG encoding off the main thread. `UIWindow.drawHierarchy(...)` still runs on the main thread (required by UIKit), but the subsequent `jpegData(compressionQuality:)` encode now dispatches to a background queue, cutting per-spike main-thread cost by roughly 30-50% (measured ~44% on iPhone XR).
+- Changes default `nativeSnapshotInterval` from 500ms to 1000ms in both `SessionRecorderConfig()` and `SessionRecorderConfig.lightweight(...)`. Halves how often the main-thread snapshot spike happens; replay timelines still capture every screen view, tap, and scroll. Hosts that want higher fidelity can still pass a shorter interval explicitly.
+
 ## 1.0.0
 
 - Makes native snapshots the only visual replay mode.
