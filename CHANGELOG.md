@@ -1,4 +1,4 @@
-## 1.1.0
+## 1.0.1
 
 - Fixes scroll jitter on ProMotion (120Hz) iPhones caused by per-snapshot main-thread work.
 - Moves iOS JPEG encoding off the main thread. `UIWindow.drawHierarchy(...)` still runs on the main thread (required by UIKit), but the subsequent `jpegData(compressionQuality:)` encode now dispatches to a background queue, cutting per-spike main-thread cost by roughly 30-50% (measured ~44% on iPhone XR).
