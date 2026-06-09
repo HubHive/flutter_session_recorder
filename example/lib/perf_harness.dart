@@ -230,6 +230,10 @@ class _PerfHarnessState extends State<PerfHarness> {
   Future<void> _ensureRecorderWithInterval(Duration interval) async {
     final SessionRecorderConfig config = SessionRecorderConfig.lightweight(
       nativeSnapshotInterval: interval,
+      // Replace with your app's domain when measuring against a real
+      // backend; the noop transport below keeps the perf harness
+      // self-contained for local-only measurements.
+      recordingDomain: 'your-app.example.com',
     );
     await recorder.initialize(
       config: config,

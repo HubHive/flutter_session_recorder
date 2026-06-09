@@ -18,11 +18,17 @@ Future<void> main() async {
       nativeSnapshotInterval: Duration(milliseconds: 500),
       nativeSnapshotMaxDimension: 720,
       snapshotUploadFlushInterval: Duration(seconds: 5),
+      // Replace with your app's domain so the server can attribute the
+      // session correctly.
+      recordingDomain: 'your-app.example.com',
     ),
+    // Replace with `HttpSessionRecorderTransport(endpoint: ..., apiKey: ...)`
+    // pointing at your recorder backend to actually upload snapshots and
+    // session batches. The noop transport keeps the example self-contained.
     transport: const NoopSessionRecorderTransport(),
     sessionProperties: <String, Object?>{
       'environment': 'example',
-      'platformCapture': 'native_snapshots_plus_structured_events',
+      'platformCapture': 'flutter_repaint_boundary',
     },
   );
 }

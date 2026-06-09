@@ -10,7 +10,9 @@ A Flutter session replay SDK built around a single visual mode: native visual sn
 
 ## Architecture
 
-The visual truth source is native snapshot capture. The SDK uploads compressed snapshots separately from JSON session batches. The event timeline stores `replay.snapshot` references plus metadata, then overlays structured events during playback.
+The visual truth source is periodic snapshot capture. By default (1.1.0+) the SDK captures using Flutter's `RenderRepaintBoundary.toImage` on the raster thread, which avoids blocking the iOS UIKit main thread during scrolls and keeps scroll responsiveness smooth on 120Hz ProMotion devices. Hosts can opt out via `useFlutterCapture: false` to use the legacy native `UIWindow.drawHierarchy` path; see the "Capture mode" section below.
+
+The SDK uploads compressed snapshots separately from JSON session batches. The event timeline stores `replay.snapshot` references plus metadata, then overlays structured events during playback.
 
 Structured events include:
 
@@ -18,6 +20,8 @@ Structured events include:
 - `interaction.tap`
 - `interaction.scroll`
 - `native.lifecycle`
+- `native.system_modal.opened` (iOS only; `label`, `className`, `depth` attributes)
+- `native.system_modal.closed` (iOS only)
 - `replay.snapshot`
 - `log`
 - `error`
@@ -57,13 +61,34 @@ MaterialApp(
 
 `recorder.runApp(...)` wraps the app with metadata capture automatically. It records screen views, taps, scrolls, logs, Flutter errors, platform errors, and explicit `recorder.log(...)` calls. Raw `print()` interception should be handled by an app-owned zone before binding initialization if you need it.
 
+## Capture mode
+
+`SessionRecorderConfig.useFlutterCapture` selects between two capture pipelines. Default is `true`.
+
+When `true` (Flutter capture, the default):
+
+- Snapshots come from a Dart-side `Timer.periodic` that calls `RenderRepaintBoundary.toImage` on the Flutter raster thread.
+- No `drawHierarchy` work on the iOS UIKit main thread, so periodic snapshots don't compete with frame production. This is the fix for slow-scroll jitter on ProMotion / 120Hz devices.
+- Embedded native widgets (`AndroidView`, `UiKitView`, `HtmlElementView`, `PlatformViewLink`) are captured as labeled grey placeholder rects: `Map`, `Web view`, `Video`, `Camera`, etc. for known plugin viewTypes; raw `viewType` strings for unknown ones. The structured rect data is also included in each snapshot's `metadata.platformViews` so replay viewers can render their own annotations.
+- iOS system modals presented over the Flutter view (share sheet, photo picker, alert, Apple Pay, etc.) are detected via swizzling of `UIViewController.present(_:animated:completion:)` and replaced with a labeled full-screen placeholder image while the modal is up. The recorder also emits structured `native.system_modal.opened` / `native.system_modal.closed` events on the session timeline.
+- The iOS keyboard is detected via `MediaQuery.viewInsets.bottom` and a labeled "Keyboard" rect is overlaid on the bottom of the captured image so replay viewers see the occlusion clearly.
+- Output format is PNG (`image/png`) instead of the legacy native JPEG.
+
+When `false` (legacy native capture):
+
+- iOS uses `UIWindow.drawHierarchy(in:afterScreenUpdates:)` on the main thread, with `layer.render(in:)` as fallback. Output is JPEG.
+- Captures embedded native widgets, system modals, and the keyboard at full pixel fidelity (UIKit-native rendering).
+- Cost: ~10-40ms of main-thread block per snapshot on ProMotion devices, which is visible as scroll jitter during slow flings.
+
+The Android plugin behavior is the same in both modes: it already runs the heavy JPEG encode on a background `HandlerThread`, so the main-thread cost is small. `useFlutterCapture: false` on Android still emits PNGs from Flutter when the recorder has a Dart capture callback attached — set it explicitly only if you want to force the native Android path for a specific deployment.
+
 ## Snapshot Uploads
 
-Native snapshot capture is the only visual mode. On iOS this snapshots the visible key `UIWindow` with `drawHierarchy(in:afterScreenUpdates:)`, falls back to `layer.render(in:)` when needed, uploads compressed JPEG snapshots to `/snapshots`, and then sends lightweight `replay.snapshot` timeline events that reference the uploaded snapshot.
+In Flutter capture mode (default), snapshots are PNG-encoded from `RenderRepaintBoundary.toImage` on the Flutter raster thread.
 
-On Android, the plugin prefers the Flutter render surface instead of a generic view-tree draw. It captures visible Flutter `SurfaceView` content with `PixelCopy` on API 26+, captures Flutter `TextureView` content with `TextureView.getBitmap(...)`, and only then falls back to active-window `PixelCopy` or decor-view drawing. This keeps the public API permission-free while avoiding the black snapshot problem caused by drawing GPU-backed Flutter surfaces as ordinary Android views.
+In legacy native mode, iOS uses `UIWindow.drawHierarchy`, with `layer.render(in:)` as fallback. Android prefers the Flutter render surface: visible `SurfaceView` content via `PixelCopy` on API 26+, `TextureView` content via `TextureView.getBitmap(...)`, with active-window `PixelCopy` or decor-view drawing as fallbacks. This keeps the public API permission-free while avoiding the black snapshot problem caused by drawing GPU-backed Flutter surfaces as ordinary Android views.
 
-This avoids screen-recording permission prompts and avoids continuous media encoding on-device. The tradeoff is that snapshots are periodic still images, not a true OS-level video stream.
+Either way, this avoids screen-recording permission prompts and avoids continuous media encoding on-device. The tradeoff is that snapshots are periodic still images, not a true OS-level video stream.
 
 Snapshots are batched before upload to reduce server request volume. By default the SDK uploads up to 10 snapshots per `/snapshots` request, or flushes the pending snapshot batch every 5 seconds. A public `recorder.flush()` also flushes pending snapshots before sending the JSON event batch.
 

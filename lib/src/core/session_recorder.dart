@@ -18,6 +18,33 @@ typedef ScreenViewListener = void Function(
 
 typedef CaptureStateListener = void Function(bool isPaused);
 
+/// Result returned from a Dart-side snapshot capture (Phase 1 of the
+/// Flutter-driven capture pipeline). Includes the encoded bytes plus the
+/// metadata the upload pipeline needs.
+class FlutterCaptureResult {
+  const FlutterCaptureResult({
+    required this.bytes,
+    required this.width,
+    required this.height,
+    this.format = 'png',
+    this.contentType = 'image/png',
+    this.metadata = const <String, Object?>{},
+  });
+
+  final Uint8List bytes;
+  final int width;
+  final int height;
+  final String format;
+  final String contentType;
+  final Map<String, Object?> metadata;
+}
+
+/// Callback that captures the current Flutter widget tree to encoded bytes.
+/// Provided by [SessionRecorderScope] to the [SessionRecorder] when the
+/// scope mounts. Returns null when capture isn't possible (boundary not
+/// laid out yet, app backgrounded, etc.).
+typedef FlutterCaptureCallback = Future<FlutterCaptureResult?> Function();
+
 class SessionRecorder {
   SessionRecorder({
     this.config = const SessionRecorderConfig(),
@@ -47,6 +74,7 @@ class SessionRecorder {
   Timer? _flushTimer;
   Timer? _recordingAccessCheckTimer;
   Timer? _snapshotUploadTimer;
+  Timer? _flutterSnapshotTimer;
   StreamSubscription<Map<String, Object?>>? _nativeEventSubscription;
   DateTime? _pausedAt;
   bool _isCheckingRecordingAccess = false;
@@ -54,9 +82,20 @@ class SessionRecorder {
   bool _isCapturePaused = false;
   bool _isFlushing = false;
   bool _isUploadingSnapshots = false;
+  bool _isFlutterCaptureInFlight = false;
   bool _nativeSnapshotCaptureRequested = false;
   int _pendingSnapshotUploadBytes = 0;
+  int _flutterSnapshotSequence = 0;
   Future<void>? _snapshotUploadInFlight;
+  FlutterCaptureCallback? _flutterCaptureCallback;
+  String? _currentScreenName;
+  // Tracks the topmost native (iOS) modal that has obscured the Flutter
+  // view, so the capture pipeline can swap toImage output for a labeled
+  // placeholder while it's visible. Null when no modal is up.
+  String? _activeModalLabel;
+  // Counts nested presents — if a sheet presents another sheet we don't
+  // want the first dismiss to clear the label.
+  int _activeModalCount = 0;
   String? _sessionId;
   Map<String, Object?> _sessionContext = <String, Object?>{};
   Map<String, Object?> _sessionProperties = <String, Object?>{};
@@ -69,6 +108,13 @@ class SessionRecorder {
   bool get isCapturePaused => _isCapturePaused;
 
   bool get isRecordingAccessDenied => _isRecordingAccessDenied;
+
+  /// Friendly label of the topmost iOS modal currently obscuring the
+  /// Flutter view (e.g. "Share sheet", "Photo picker"), or null if no
+  /// modal is up. [SessionRecorderScope] consults this on every snapshot
+  /// to swap the toImage capture for a placeholder image while a modal is
+  /// presented over the Flutter view.
+  String? get activeModalLabel => _activeModalLabel;
 
   String? get sessionId => _sessionId;
 
@@ -138,7 +184,11 @@ class SessionRecorder {
 
     await _startNativeCapture();
     if (_nativeSnapshotCaptureRequested && startNativeSnapshots) {
-      await _startNativeSnapshotCapture();
+      if (config.useFlutterCapture) {
+        _startFlutterSnapshotTimer();
+      } else {
+        await _startNativeSnapshotCapture();
+      }
     }
     _startFlushTimer();
 
@@ -168,6 +218,7 @@ class SessionRecorder {
     _flushTimer = null;
     _recordingAccessCheckTimer?.cancel();
     _recordingAccessCheckTimer = null;
+    _stopFlutterSnapshotTimer();
     await _stopNativeCapture();
     await _flushSnapshotUploads();
     _nativeSnapshotCaptureRequested = false;
@@ -194,6 +245,11 @@ class SessionRecorder {
       _isRecordingAccessDenied = false;
       _isCheckingRecordingAccess = false;
       _isCapturePaused = false;
+      _isFlutterCaptureInFlight = false;
+      _flutterSnapshotSequence = 0;
+      _currentScreenName = null;
+      _activeModalLabel = null;
+      _activeModalCount = 0;
       _sessionContext = <String, Object?>{};
       _startedAt = null;
       _sessionProperties = <String, Object?>{};
@@ -302,6 +358,7 @@ class SessionRecorder {
     _pausedAt = _now().toUtc();
     _flushTimer?.cancel();
     _flushTimer = null;
+    _stopFlutterSnapshotTimer();
     if (_nativeSnapshotCaptureRequested) {
       await _stopNativeSnapshotCapture();
     }
@@ -380,12 +437,140 @@ class SessionRecorder {
     if (!isRecording || _isCapturePaused || _isRecordingAccessDenied) {
       return;
     }
-    await _startNativeSnapshotCapture();
+    if (config.useFlutterCapture) {
+      _startFlutterSnapshotTimer();
+    } else {
+      await _startNativeSnapshotCapture();
+    }
   }
 
   Future<void> stopSnapshotCapture() async {
     _nativeSnapshotCaptureRequested = false;
+    _stopFlutterSnapshotTimer();
     await _stopNativeSnapshotCapture();
+  }
+
+  /// Registers a callback that captures the current Flutter widget tree.
+  /// The [SessionRecorderScope] calls this on mount; the recorder uses the
+  /// callback when [SessionRecorderConfig.useFlutterCapture] is true.
+  void attachFlutterCaptureCallback(FlutterCaptureCallback callback) {
+    _flutterCaptureCallback = callback;
+    if (isRecording &&
+        !_isCapturePaused &&
+        !_isRecordingAccessDenied &&
+        _nativeSnapshotCaptureRequested &&
+        config.useFlutterCapture) {
+      _startFlutterSnapshotTimer();
+    }
+  }
+
+  /// Removes a previously-registered callback. Safe to call multiple times.
+  void detachFlutterCaptureCallback(FlutterCaptureCallback callback) {
+    if (identical(_flutterCaptureCallback, callback)) {
+      _flutterCaptureCallback = null;
+      _stopFlutterSnapshotTimer();
+    }
+  }
+
+  void _startFlutterSnapshotTimer() {
+    if (_flutterSnapshotTimer != null) {
+      return;
+    }
+    if (_flutterCaptureCallback == null) {
+      // The scope hasn't attached its callback yet. It will start the timer
+      // itself when it does.
+      return;
+    }
+    _flutterSnapshotTimer = Timer.periodic(
+      config.nativeSnapshotInterval,
+      (_) => unawaited(_captureFlutterSnapshot()),
+    );
+  }
+
+  void _stopFlutterSnapshotTimer() {
+    _flutterSnapshotTimer?.cancel();
+    _flutterSnapshotTimer = null;
+  }
+
+  Future<void> _captureFlutterSnapshot() async {
+    if (_isFlutterCaptureInFlight) {
+      // A capture is already running on the raster thread; skip this tick
+      // rather than queueing. At 1 Hz the raster thread should always be
+      // done before the next tick — if not, we'd rather drop frames than
+      // back up.
+      return;
+    }
+    if (!isRecording ||
+        _isCapturePaused ||
+        _isRecordingAccessDenied ||
+        !_nativeSnapshotCaptureRequested) {
+      return;
+    }
+    final FlutterCaptureCallback? callback = _flutterCaptureCallback;
+    if (callback == null) {
+      return;
+    }
+    final String? activeSessionId = _sessionId;
+    if (activeSessionId == null) {
+      return;
+    }
+
+    _isFlutterCaptureInFlight = true;
+    try {
+      final FlutterCaptureResult? result = await callback();
+      if (result == null || result.bytes.isEmpty) {
+        return;
+      }
+      if (_sessionId != activeSessionId ||
+          _isCapturePaused ||
+          _isRecordingAccessDenied) {
+        return;
+      }
+
+      _flutterSnapshotSequence += 1;
+      final DateTime timestamp = _now().toUtc();
+      final String snapshotId =
+          'flutter_${timestamp.millisecondsSinceEpoch}_$_flutterSnapshotSequence';
+      final Map<String, Object?> metadata = <String, Object?>{
+        'captureStrategy': 'flutter_repaint_boundary',
+        'platform': defaultTargetPlatform.name,
+        'sequence': _flutterSnapshotSequence,
+        'fileSize': result.bytes.length,
+        ...result.metadata,
+      };
+
+      final SessionSnapshotUpload upload = SessionSnapshotUpload(
+        bytes: result.bytes,
+        contentType: result.contentType,
+        filename: '$snapshotId.${result.format}',
+        format: result.format,
+        height: result.height,
+        metadata: metadata,
+        screenName: _currentScreenName,
+        sessionContext: Map<String, Object?>.from(_sessionContext),
+        sessionId: activeSessionId,
+        sessionProperties: Map<String, Object?>.from(_sessionProperties),
+        snapshotId: snapshotId,
+        timestamp: timestamp,
+        userId: _userId,
+        userProperties: Map<String, Object?>.from(_userProperties),
+        width: result.width,
+      );
+      _queueSnapshotUpload(upload);
+    } catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'flutter_session_recorder',
+          context: ErrorDescription(
+            'while capturing a Flutter-side snapshot',
+          ),
+        ),
+      );
+    } finally {
+      _isFlutterCaptureInFlight = false;
+    }
   }
 
   void setUserProperties(Map<String, Object?> properties) {
@@ -487,6 +672,7 @@ class SessionRecorder {
   }) {
     final Map<String, Object?> normalizedProperties =
         Map<String, Object?>.from(properties);
+    _currentScreenName = screenName;
     unawaited(_nativeBridge.setScreenName(screenName));
     _enqueue(
       RecorderEvent(
@@ -847,6 +1033,7 @@ class SessionRecorder {
   }) async {
     _flushTimer?.cancel();
     _flushTimer = null;
+    _stopFlutterSnapshotTimer();
     if (_nativeSnapshotCaptureRequested) {
       await _stopNativeSnapshotCapture();
     }
@@ -866,6 +1053,7 @@ class SessionRecorder {
 
     _buffer.clear();
     _sessionHistory.clear();
+    _flutterSnapshotSequence = 0;
     _sessionId = _idGenerator();
     _startedAt = _now().toUtc();
     _userId = nextUserId;
@@ -923,6 +1111,7 @@ class SessionRecorder {
     _pausedAt = _now().toUtc();
     _flushTimer?.cancel();
     _flushTimer = null;
+    _stopFlutterSnapshotTimer();
     _clearPendingSnapshotUploads();
     _buffer.clear();
     _sessionHistory.clear();
@@ -1119,7 +1308,11 @@ class SessionRecorder {
     try {
       await _nativeBridge.resumeCapture(config);
       if (_nativeSnapshotCaptureRequested) {
-        await _startNativeSnapshotCapture();
+        if (config.useFlutterCapture) {
+          _startFlutterSnapshotTimer();
+        } else {
+          await _startNativeSnapshotCapture();
+        }
       }
     } catch (error, stackTrace) {
       FlutterError.reportError(
@@ -1155,6 +1348,36 @@ class SessionRecorder {
       return;
     }
     if (type == 'native.snapshot_capture.status') {
+      return;
+    }
+    if (type == 'native.system_modal.opened') {
+      final String label =
+          (attributes['label'] as String?) ?? 'System modal';
+      _activeModalCount += 1;
+      _activeModalLabel = label;
+      // Pass through to the timeline so the replay viewer has its own
+      // record independent of the placeholder snapshots.
+      _enqueue(
+        RecorderEvent(
+          type: 'native.system_modal.opened',
+          attributes: attributes,
+        ),
+      );
+      return;
+    }
+    if (type == 'native.system_modal.closed') {
+      if (_activeModalCount > 0) {
+        _activeModalCount -= 1;
+      }
+      if (_activeModalCount == 0) {
+        _activeModalLabel = null;
+      }
+      _enqueue(
+        RecorderEvent(
+          type: 'native.system_modal.closed',
+          attributes: attributes,
+        ),
+      );
       return;
     }
     if (!_isSupportedNativeEventType(type)) {

@@ -26,6 +26,17 @@ class SessionRecorderConfig {
     this.recordingDomain,
     this.snapshotUploadFlushInterval = const Duration(seconds: 5),
     this.scrollEventThrottle = const Duration(milliseconds: 250),
+    // When true (default), snapshots are captured Dart-side via
+    // RenderRepaintBoundary.toImage on the Flutter raster thread, avoiding
+    // the iOS main-thread GPU-readback cost of UIWindow.drawHierarchy.
+    // Trade-off: embedded native widgets (PlatformViews like maps/webviews)
+    // are captured as labeled placeholder rects, and OS-level modals
+    // presented over the Flutter view (photo picker, share sheet, etc.) are
+    // captured as labeled placeholder images. Set to false to fall back to
+    // the legacy native UIWindow drawHierarchy capture, which preserves
+    // full visual fidelity at the cost of main-thread jitter on ProMotion
+    // displays during scrolling.
+    this.useFlutterCapture = true,
   });
 
   const SessionRecorderConfig.lightweight({
@@ -52,6 +63,7 @@ class SessionRecorderConfig {
     String? recordingDomain,
     Duration snapshotUploadFlushInterval = const Duration(seconds: 5),
     Duration scrollEventThrottle = const Duration(milliseconds: 250),
+    bool useFlutterCapture = true,
   }) : this(
           captureNavigation: captureNavigation,
           captureScrolls: captureScrolls,
@@ -76,6 +88,7 @@ class SessionRecorderConfig {
           recordingDomain: recordingDomain,
           snapshotUploadFlushInterval: snapshotUploadFlushInterval,
           scrollEventThrottle: scrollEventThrottle,
+          useFlutterCapture: useFlutterCapture,
         );
 
   final bool captureNavigation;
@@ -101,6 +114,7 @@ class SessionRecorderConfig {
   final String? recordingDomain;
   final Duration snapshotUploadFlushInterval;
   final Duration scrollEventThrottle;
+  final bool useFlutterCapture;
 
   Map<String, Object?> toJson() {
     return <String, Object?>{
@@ -129,6 +143,7 @@ class SessionRecorderConfig {
       'snapshotUploadFlushIntervalMs':
           snapshotUploadFlushInterval.inMilliseconds,
       'scrollEventThrottleMs': scrollEventThrottle.inMilliseconds,
+      'useFlutterCapture': useFlutterCapture,
     };
   }
 }

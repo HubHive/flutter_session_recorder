@@ -232,8 +232,7 @@ private final class IOSWindowSnapshotCaptureManager {
 
       // Move JPEG encoding off the main thread. UIImage.jpegData operates on
       // the underlying immutable CGImage and is documented as thread-safe;
-      // it's pure CPU work with no UIKit access. This is the bulk of the
-      // per-spike main-thread cost we measured on ProMotion devices.
+      // it's pure CPU work with no UIKit access.
       self.snapshotQueue.async {
         guard let data = image.jpegData(compressionQuality: jpegQuality) else {
           self.emitStatus(
@@ -426,6 +425,10 @@ private final class IOSNativeCaptureManager: NSObject, UIGestureRecognizerDelega
 
     registerLifecycleObservers()
     attachGestureRecognizersIfNeeded()
+    SessionRecorderModalObserver.shared.installSwizzleIfNeeded()
+    SessionRecorderModalObserver.shared.eventEmitter = { [weak self] type, attributes in
+      self?.emitEvent(type: type, attributes: attributes)
+    }
     emitScreenView(reason: "start")
   }
 
@@ -435,6 +438,7 @@ private final class IOSNativeCaptureManager: NSObject, UIGestureRecognizerDelega
     snapshotCaptureManager.stop { _ in }
     NotificationCenter.default.removeObserver(self)
     detachGestureRecognizers()
+    SessionRecorderModalObserver.shared.eventEmitter = nil
   }
 
   func pause() {
@@ -695,5 +699,167 @@ private extension Dictionary where Key == String, Value == Any {
 private extension String {
   var nonEmptyValue: String? {
     isEmpty ? nil : self
+  }
+}
+
+// MARK: - System modal detection
+//
+// Swizzles UIViewController.present(_:animated:completion:) and
+// dismiss(animated:completion:) globally so we can notify the session
+// recorder when iOS presents native UI over the Flutter view (share sheet,
+// photo picker, alerts, Apple Pay, etc.). The Dart side uses these signals
+// to swap the toImage capture for a labeled placeholder image while the
+// modal is on screen, because toImage only sees the Flutter content
+// underneath and would otherwise produce a misleading replay frame.
+
+final class SessionRecorderModalObserver {
+  static let shared = SessionRecorderModalObserver()
+  private init() {}
+
+  /// Sink that forwards a (type, attributes) pair to the Flutter event
+  /// channel. Set by the plugin on start; cleared on stop.
+  var eventEmitter: ((String, [String: Any]) -> Void)?
+
+  private var isSwizzled = false
+  // Modal presents can nest (sheet → sheet). Track depth so the first
+  // dismiss doesn't clear the active modal state until all are gone.
+  private var presentDepth = 0
+
+  func installSwizzleIfNeeded() {
+    guard !isSwizzled else { return }
+    isSwizzled = true
+    swizzlePresent()
+    swizzleDismiss()
+  }
+
+  fileprivate func modalDidOpen(_ viewController: UIViewController) {
+    presentDepth += 1
+    let className = String(describing: type(of: viewController))
+    let label = Self.friendlyLabel(for: className)
+    eventEmitter?(
+      "native.system_modal.opened",
+      [
+        "label": label,
+        "className": className,
+        "depth": presentDepth,
+      ]
+    )
+  }
+
+  fileprivate func modalDidClose() {
+    guard presentDepth > 0 else { return }
+    presentDepth -= 1
+    eventEmitter?(
+      "native.system_modal.closed",
+      [
+        "depth": presentDepth,
+      ]
+    )
+  }
+
+  // Friendly labels for well-known UIKit and system VCs. Specific exact
+  // matches take precedence; substring patterns catch the private-API
+  // intermediate / success / presenter variants that iOS swaps in during
+  // multi-stage flows (e.g. UIActivityViewSuccessController appears after
+  // the user picks a destination). Falls back to the raw class name only
+  // for genuinely unknown VCs.
+  private static func friendlyLabel(for className: String) -> String {
+    let exactMatches: [String: String] = [
+      "UIActivityViewController": "Share sheet",
+      "UIImagePickerController": "Photo picker",
+      "PHPickerViewController": "Photo picker",
+      "UIDocumentPickerViewController": "Document picker",
+      "UIDocumentMenuViewController": "Document picker",
+      "UIAlertController": "Alert",
+      "MFMailComposeViewController": "Mail composer",
+      "MFMessageComposeViewController": "Message composer",
+      "PKPaymentAuthorizationViewController": "Apple Pay",
+      "ASAuthorizationController": "Sign in with Apple",
+      "SFSafariViewController": "Safari view",
+      "AVPlayerViewController": "Video player",
+      "CNContactPickerViewController": "Contact picker",
+      "EKEventEditViewController": "Calendar event",
+      "EKEventViewController": "Calendar event",
+      "UIPrintInteractionController": "Print",
+    ]
+    if let label = exactMatches[className] {
+      return label
+    }
+    // Substring patterns for the multi-stage / private-API VCs.
+    if className.contains("Activity") {
+      // Catches UIActivityViewSuccessController,
+      // _UIActivityViewControllerPresenterViewController, etc.
+      return "Share sheet"
+    }
+    if className.contains("Picker") {
+      return "Picker"
+    }
+    if className.contains("Alert") {
+      return "Alert"
+    }
+    if className.contains("Payment") {
+      return "Apple Pay"
+    }
+    if className.contains("Print") {
+      return "Print"
+    }
+    // _UIRemoteViewController is the system-process wrapper used for
+    // share/photo/Apple Pay sheets when they hide their concrete class.
+    if className.hasPrefix("_UIRemote") {
+      return "System sheet"
+    }
+    return className
+  }
+
+  private func swizzlePresent() {
+    let original = #selector(
+      UIViewController.present(_:animated:completion:))
+    let swizzled = #selector(
+      UIViewController.flutterSessionRecorder_present(_:animated:completion:))
+    guard let originalMethod = class_getInstanceMethod(UIViewController.self, original),
+          let swizzledMethod = class_getInstanceMethod(UIViewController.self, swizzled) else {
+      return
+    }
+    method_exchangeImplementations(originalMethod, swizzledMethod)
+  }
+
+  private func swizzleDismiss() {
+    let original = #selector(
+      UIViewController.dismiss(animated:completion:))
+    let swizzled = #selector(
+      UIViewController.flutterSessionRecorder_dismiss(animated:completion:))
+    guard let originalMethod = class_getInstanceMethod(UIViewController.self, original),
+          let swizzledMethod = class_getInstanceMethod(UIViewController.self, swizzled) else {
+      return
+    }
+    method_exchangeImplementations(originalMethod, swizzledMethod)
+  }
+}
+
+extension UIViewController {
+  // After method_exchangeImplementations, these "swizzled" selectors point
+  // at the ORIGINAL UIKit implementations, and the original selectors
+  // point here. So calling `flutterSessionRecorder_present` recursively
+  // below is actually invoking UIKit's real present.
+  @objc func flutterSessionRecorder_present(
+    _ viewController: UIViewController,
+    animated: Bool,
+    completion: (() -> Void)?
+  ) {
+    SessionRecorderModalObserver.shared.modalDidOpen(viewController)
+    self.flutterSessionRecorder_present(viewController, animated: animated, completion: completion)
+  }
+
+  @objc func flutterSessionRecorder_dismiss(
+    animated: Bool,
+    completion: (() -> Void)?
+  ) {
+    // dismiss(animated:) called on a presenting VC dismisses its
+    // presentedViewController; called on a presented VC dismisses self via
+    // its presentingViewController. Either way, one modal is going away.
+    if self.presentedViewController != nil || self.presentingViewController != nil {
+      SessionRecorderModalObserver.shared.modalDidClose()
+    }
+    self.flutterSessionRecorder_dismiss(animated: animated, completion: completion)
   }
 }

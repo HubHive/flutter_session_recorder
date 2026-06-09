@@ -1,3 +1,12 @@
+## 1.1.0
+
+- Adds a Flutter-driven snapshot capture pipeline (default `useFlutterCapture: true`) that renders via `RenderRepaintBoundary.toImage` on the Flutter raster thread. Eliminates the iOS UIKit main-thread `drawHierarchy` cost (~35ms per snapshot measured on iPhone 17 ProMotion), which had been causing visible jitter during slow scrolls on 120Hz displays. Output format changes from JPEG to PNG.
+- Embedded native widgets (`AndroidView`, `UiKitView`, `HtmlElementView`, `PlatformViewLink`) are walked from the Dart widget tree before each snapshot and rendered as labeled placeholder rects ("Map", "Web view", "Video", "Camera", etc. for known plugin viewTypes; raw `viewType` otherwise). Structured rect data is included on the snapshot's `metadata.platformViews`.
+- Adds iOS system modal detection via swizzling of `UIViewController.present(_:animated:completion:)` and `dismiss(animated:completion:)`. When a system modal (share sheet, photo picker, alert, Apple Pay, mail composer, etc.) is presented over the Flutter view, the recorder substitutes a labeled full-screen placeholder image and emits `native.system_modal.opened` / `native.system_modal.closed` events with the presented VC's class name and a friendly label.
+- Adds an iOS keyboard overlay: when `MediaQuery.viewInsets.bottom > 0`, a labeled "Keyboard" rect is painted over the bottom portion of the captured image so replay viewers can see the occlusion clearly. Captured image dimensions remain stable across keyboard-up/down transitions.
+- Adds the missing iOS pan event time throttle on the gesture recognizer attached to the key window. The `scrollEventThrottleMs` config field is now honored on iOS, matching the Android plugin. Slow finger drags on ProMotion devices no longer flood the platform channel with redundant scroll events.
+- Hosts can opt back to the legacy native `UIWindow.drawHierarchy` capture with `SessionRecorderConfig(useFlutterCapture: false)` for full pixel fidelity of platform views and system modals, at the cost of the main-thread snapshot block.
+
 ## 1.0.2
 - Updated podspec
 

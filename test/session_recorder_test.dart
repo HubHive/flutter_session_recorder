@@ -166,6 +166,7 @@ void main() {
     expect(config.maxSnapshotUploadBatchSize, 10);
     expect(config.snapshotUploadFlushInterval, const Duration(seconds: 5));
     expect(config.recordingDomain, 'app.hubhive.com');
+    expect(config.useFlutterCapture, isTrue);
     expect(config.toJson(), containsPair('nativeSnapshotIntervalMs', 1000));
     expect(config.toJson(), containsPair('nativeSnapshotJpegQuality', 0.65));
     expect(config.toJson(), containsPair('nativeSnapshotMaxDimension', 720));
@@ -175,10 +176,102 @@ void main() {
       containsPair('snapshotUploadFlushIntervalMs', 5000),
     );
     expect(config.toJson(), containsPair('recordingDomain', 'app.hubhive.com'));
+    expect(config.toJson(), containsPair('useFlutterCapture', true));
     expect(config.toJson(), isNot(contains('captureSchematicFrames')));
     expect(config.toJson(), isNot(contains('captureScreenshotKeyframes')));
     expect(config.toJson(), isNot(contains('uploadAssetImages')));
   });
+
+  test(
+    'useFlutterCapture: true skips native startSnapshotCapture',
+    () async {
+      final nativeBridge = _FakeNativeBridge();
+      final sessionRecorder = SessionRecorder(
+        config: const SessionRecorderConfig.lightweight(),
+        nativeBridge: nativeBridge,
+      );
+
+      await sessionRecorder.start();
+
+      // The native plugin should be started for event capture, but the
+      // snapshot capture loop should NOT be — the Dart toImage timer takes
+      // over that responsibility when useFlutterCapture is on.
+      expect(nativeBridge.started, isTrue);
+      expect(nativeBridge.snapshotStarted, isFalse);
+
+      await sessionRecorder.stop();
+      await nativeBridge.dispose();
+    },
+  );
+
+  test(
+    'useFlutterCapture: false still calls native startSnapshotCapture',
+    () async {
+      final nativeBridge = _FakeNativeBridge();
+      final sessionRecorder = SessionRecorder(
+        config: const SessionRecorderConfig.lightweight(
+          useFlutterCapture: false,
+        ),
+        nativeBridge: nativeBridge,
+      );
+
+      await sessionRecorder.start();
+      expect(nativeBridge.snapshotStarted, isTrue);
+
+      await sessionRecorder.stop();
+      await nativeBridge.dispose();
+    },
+  );
+
+  test(
+    'native.system_modal events update activeModalLabel with nested depth',
+    () async {
+      final nativeBridge = _FakeNativeBridge();
+      final sessionRecorder = SessionRecorder(
+        config: const SessionRecorderConfig.lightweight(),
+        nativeBridge: nativeBridge,
+      );
+      await sessionRecorder.start();
+
+      expect(sessionRecorder.activeModalLabel, isNull);
+
+      // Outer modal opens — label should be set.
+      nativeBridge.emit('native.system_modal.opened', attributes: {
+        'label': 'Share sheet',
+        'className': 'UIActivityViewController',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(sessionRecorder.activeModalLabel, 'Share sheet');
+
+      // Nested modal opens (e.g. sheet presents another sheet). The newer
+      // label should be active.
+      nativeBridge.emit('native.system_modal.opened', attributes: {
+        'label': 'Alert',
+        'className': 'UIAlertController',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(sessionRecorder.activeModalLabel, 'Alert');
+
+      // First close should NOT clear the label — depth is still 1.
+      nativeBridge.emit('native.system_modal.closed', attributes: const {});
+      await Future<void>.delayed(Duration.zero);
+      expect(sessionRecorder.activeModalLabel, isNotNull);
+
+      // Second close brings depth to 0; label clears.
+      nativeBridge.emit('native.system_modal.closed', attributes: const {});
+      await Future<void>.delayed(Duration.zero);
+      expect(sessionRecorder.activeModalLabel, isNull);
+
+      // Extra closes (e.g. if iOS dismisses without calling dismiss()) are
+      // safely ignored.
+      nativeBridge.emit('native.system_modal.closed', attributes: const {});
+      await Future<void>.delayed(Duration.zero);
+      expect(sessionRecorder.activeModalLabel, isNull);
+
+      await sessionRecorder.stop();
+      await nativeBridge.dispose();
+    },
+  );
 
   test('records lifecycle and custom events into a visual session batch',
       () async {
@@ -533,8 +626,13 @@ void main() {
     final transport = _FakeTransport();
     final nativeBridge = _FakeNativeBridge();
     final sessionRecorder = SessionRecorder(
+      // useFlutterCapture: false targets the legacy native drawHierarchy
+      // path that this test exercises end-to-end. The new default is true,
+      // which uses RepaintBoundary.toImage and never calls the native
+      // snapshot capture method.
       config: const SessionRecorderConfig.lightweight(
         recordingDomain: 'app.hubhive.com',
+        useFlutterCapture: false,
       ),
       nativeBridge: nativeBridge,
       transport: transport,
@@ -644,6 +742,7 @@ void main() {
       config: const SessionRecorderConfig.lightweight(
         maxSnapshotUploadBatchSize: 3,
         snapshotUploadFlushInterval: Duration(minutes: 1),
+        useFlutterCapture: false,
       ),
       nativeBridge: nativeBridge,
       transport: transport,
@@ -704,6 +803,7 @@ void main() {
       config: const SessionRecorderConfig.lightweight(
         maxSnapshotUploadBatchSize: 1,
         recordingAccessCheckInterval: Duration(milliseconds: 1),
+        useFlutterCapture: false,
       ),
       nativeBridge: nativeBridge,
       transport: transport,
