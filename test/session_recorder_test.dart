@@ -160,13 +160,13 @@ void main() {
       recordingDomain: 'app.hubhive.com',
     );
 
-    expect(config.nativeSnapshotInterval, const Duration(milliseconds: 500));
+    expect(config.nativeSnapshotInterval, const Duration(milliseconds: 1000));
     expect(config.nativeSnapshotJpegQuality, 0.65);
     expect(config.nativeSnapshotMaxDimension, 720);
     expect(config.maxSnapshotUploadBatchSize, 10);
     expect(config.snapshotUploadFlushInterval, const Duration(seconds: 5));
     expect(config.recordingDomain, 'app.hubhive.com');
-    expect(config.toJson(), containsPair('nativeSnapshotIntervalMs', 500));
+    expect(config.toJson(), containsPair('nativeSnapshotIntervalMs', 1000));
     expect(config.toJson(), containsPair('nativeSnapshotJpegQuality', 0.65));
     expect(config.toJson(), containsPair('nativeSnapshotMaxDimension', 720));
     expect(config.toJson(), containsPair('maxSnapshotUploadBatchSize', 10));

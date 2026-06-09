@@ -223,20 +223,28 @@ private final class IOSWindowSnapshotCaptureManager {
         return
       }
 
-      guard let data = image.jpegData(compressionQuality: self.jpegQuality) else {
-        self.snapshotQueue.async {
+      // Capture the values we need from the UIImage while still on the main
+      // thread (UIImage properties are immutable post-init and safe to read
+      // off-thread too, but reading once here keeps the closure simple).
+      let pixelWidth = Int(image.size.width * image.scale)
+      let pixelHeight = Int(image.size.height * image.scale)
+      let jpegQuality = self.jpegQuality
+
+      // Move JPEG encoding off the main thread. UIImage.jpegData operates on
+      // the underlying immutable CGImage and is documented as thread-safe;
+      // it's pure CPU work with no UIKit access. This is the bulk of the
+      // per-spike main-thread cost we measured on ProMotion devices.
+      self.snapshotQueue.async {
+        guard let data = image.jpegData(compressionQuality: jpegQuality) else {
           self.emitStatus(
             phase: "snapshot_encode_failed",
             level: "warning",
             message: "Unable to encode the key window snapshot."
           )
           self.scheduleNextSnapshot()
+          return
         }
-        return
-      }
-
-      self.snapshotQueue.async {
-        self.writeSnapshot(data: data, width: Int(image.size.width * image.scale), height: Int(image.size.height * image.scale))
+        self.writeSnapshot(data: data, width: pixelWidth, height: pixelHeight)
       }
     }
   }

@@ -20,8 +20,7 @@ class SessionRecorderScope extends StatefulWidget {
   State<SessionRecorderScope> createState() => _SessionRecorderScopeState();
 }
 
-class _SessionRecorderScopeState extends State<SessionRecorderScope>
-    with WidgetsBindingObserver {
+class _SessionRecorderScopeState extends State<SessionRecorderScope> with WidgetsBindingObserver {
   bool _didTrackInitialScreen = false;
   String? _lastScreenName;
   DateTime? _lastScrollEventAt;
@@ -65,23 +64,18 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope>
   }
 
   bool _handleScrollNotification(ScrollNotification notification) {
-    if (!widget.recorder.isRecording ||
-        widget.recorder.isCapturePaused ||
-        !widget.recorder.config.captureScrolls) {
+    if (!widget.recorder.isRecording || widget.recorder.isCapturePaused || !widget.recorder.config.captureScrolls) {
       return false;
     }
 
-    if (notification is! ScrollUpdateNotification &&
-        notification is! ScrollEndNotification) {
+    if (notification is! ScrollUpdateNotification && notification is! ScrollEndNotification) {
       return false;
     }
 
     final DateTime now = DateTime.now().toUtc();
     if (notification is ScrollUpdateNotification) {
       final DateTime? lastScrollEventAt = _lastScrollEventAt;
-      if (lastScrollEventAt != null &&
-          now.difference(lastScrollEventAt) <
-              widget.recorder.config.scrollEventThrottle) {
+      if (lastScrollEventAt != null && now.difference(lastScrollEventAt) < widget.recorder.config.scrollEventThrottle) {
         return false;
       }
     }
@@ -103,9 +97,7 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope>
   }
 
   void _handlePointerUp(PointerUpEvent event) {
-    if (!widget.recorder.isRecording ||
-        widget.recorder.isCapturePaused ||
-        !widget.recorder.config.captureTaps) {
+    if (!widget.recorder.isRecording || widget.recorder.isCapturePaused || !widget.recorder.config.captureTaps) {
       return;
     }
 
@@ -127,8 +119,7 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope>
       }
     }
 
-    if (!widget.recorder.isRecording ||
-        !widget.recorder.config.captureNavigation) {
+    if (!widget.recorder.isRecording || !widget.recorder.config.captureNavigation) {
       return;
     }
 

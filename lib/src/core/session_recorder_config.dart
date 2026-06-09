@@ -17,7 +17,10 @@ class SessionRecorderConfig {
     this.minimumScrollDelta = 24,
     this.maxSnapshotUploadBatchBytes = 4 * 1024 * 1024,
     this.maxSnapshotUploadBatchSize = 10,
-    this.nativeSnapshotInterval = const Duration(milliseconds: 500),
+    // 1Hz capture keeps a useful replay timeline while halving how often the
+    // iOS UIWindow snapshot pipeline blocks the main thread. Hosts that want
+    // higher fidelity can pass a shorter interval explicitly.
+    this.nativeSnapshotInterval = const Duration(milliseconds: 1000),
     this.nativeSnapshotJpegQuality = 0.65,
     this.nativeSnapshotMaxDimension = 720,
     this.recordingDomain,
@@ -43,7 +46,7 @@ class SessionRecorderConfig {
     double minimumScrollDelta = 24,
     int maxSnapshotUploadBatchBytes = 4 * 1024 * 1024,
     int maxSnapshotUploadBatchSize = 10,
-    Duration nativeSnapshotInterval = const Duration(milliseconds: 500),
+    Duration nativeSnapshotInterval = const Duration(milliseconds: 1000),
     double nativeSnapshotJpegQuality = 0.65,
     int nativeSnapshotMaxDimension = 720,
     String? recordingDomain,

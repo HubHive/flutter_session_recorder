@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_session_recorder/flutter_session_recorder.dart';
 
+import 'perf_harness.dart';
+
 Future<void> main() async {
   await recorder.runApp(
     const RecorderDemoApp(),
@@ -10,7 +12,7 @@ Future<void> main() async {
       nativeSnapshotMaxDimension: 720,
       snapshotUploadFlushInterval: Duration(seconds: 5),
     ),
-    transport: const DebugPrintSessionRecorderTransport(),
+    transport: const NoopSessionRecorderTransport(),
     sessionProperties: <String, Object?>{
       'environment': 'example',
       'platformCapture': 'native_snapshots_plus_structured_events',
@@ -31,83 +33,100 @@ class RecorderDemoApp extends StatelessWidget {
   }
 }
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Session Recorder Demo')),
-      body: ListView.builder(
-        itemCount: 30,
-        itemBuilder: (BuildContext context, int index) {
-          if (index == 0) {
-            return Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  ElevatedButton(
-                    onPressed: () {
-                      recorder.recordEvent(
-                        'purchase_button_tapped',
-                        properties: <String, Object?>{'cta': 'hero'},
-                      );
-                      recorder.log(
-                        'Hero CTA tapped',
-                        logger: 'demo',
-                      );
-                    },
-                    child: const Text('Track custom event'),
-                  ),
-                  const SizedBox(height: 12),
-                  ElevatedButton(
-                    onPressed: () {
-                      recorder.setUser(
-                        'demo-user',
-                        userProperties: <String, Object?>{'plan': 'pro'},
-                      );
-                    },
-                    child: const Text('Set current user'),
-                  ),
-                  const SizedBox(height: 12),
-                  ElevatedButton(
-                    onPressed: () {
-                      recorder.setUserProperties(
-                        <String, Object?>{'plan': 'enterprise'},
-                      );
-                    },
-                    child: const Text('Update user properties'),
-                  ),
-                  const SizedBox(height: 12),
-                  ElevatedButton(
-                    onPressed: () {
-                      recorder.clearUser();
-                    },
-                    child: const Text('Clear current user'),
-                  ),
-                ],
-              ),
-            );
-          }
+      appBar: AppBar(title: const Text('Session Recorder Perf Harness')),
+      body: PerfHarness(
+        scrollController: _scrollController,
+        child: ListView.builder(
+          controller: _scrollController,
+          itemCount: 500,
+          itemBuilder: (BuildContext context, int index) {
+            return _ListRow(index: index);
+          },
+        ),
+      ),
+    );
+  }
+}
 
-          return ListTile(
-            title: Text('Item $index'),
-            subtitle: const Text('Scroll and tap to generate telemetry'),
-            onTap: () {
-              recorder.recordEvent(
-                'list_item_selected',
-                properties: <String, Object?>{'index': index},
-              );
-              if (index == 7) {
-                recorder.error(
-                  StateError('Example item 7 triggered an error'),
-                  logger: 'demo',
-                );
-              }
-            },
-          );
-        },
+class _ListRow extends StatelessWidget {
+  const _ListRow({required this.index});
+
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color tint = Color.lerp(
+          Colors.indigo.shade100,
+          Colors.deepOrange.shade100,
+          (index % 50) / 50.0,
+        ) ??
+        Colors.white;
+    return Container(
+      height: 88,
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: tint,
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: <Widget>[
+          CircleAvatar(
+            backgroundColor: Colors.white,
+            child: Text(
+              '$index',
+              style: const TextStyle(color: Colors.black87),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                Text(
+                  'Item $index',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Scroll to generate frames for the harness to measure',
+                  style: TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ],
+            ),
+          ),
+          const Icon(Icons.chevron_right),
+        ],
       ),
     );
   }
