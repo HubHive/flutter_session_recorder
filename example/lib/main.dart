@@ -1,9 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_session_recorder/flutter_session_recorder.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'perf_harness.dart';
 
 Future<void> main() async {
+  // Keep the device awake while the harness is running so an auto-lock
+  // doesn't interrupt a measurement mid-scenario. Binding has to be ready
+  // before we touch the wakelock plugin's method channel.
+  WidgetsFlutterBinding.ensureInitialized();
+  await WakelockPlus.enable();
+
   await recorder.runApp(
     const RecorderDemoApp(),
     config: const SessionRecorderConfig.lightweight(

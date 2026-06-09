@@ -10,6 +10,9 @@ dependencies:
     sdk: flutter
   flutter_session_recorder:
     path: ..
+  # Keeps the screen on while running the perf harness so the device doesn't
+  # auto-lock mid-scenario. Example-app only — not a dependency of the package.
+  wakelock_plus: ^1.2.8
 
 dev_dependencies:
   flutter_test:

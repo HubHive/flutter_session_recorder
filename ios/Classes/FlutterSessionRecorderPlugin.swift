@@ -410,8 +410,10 @@ private final class IOSNativeCaptureManager: NSObject, UIGestureRecognizerDelega
   private var flutterScreenName: String?
   private var isStarted = false
   private var lastScreenName: String?
+  private var lastScrollEmittedAtMs: Double = 0
   private var minimumScrollDelta: CGFloat = 24
   private var panRecognizer: UIPanGestureRecognizer?
+  private var scrollEventThrottleMs: Double = 250
   private var tapRecognizer: UITapGestureRecognizer?
 
   func start(config: [String: Any]) {
@@ -419,6 +421,7 @@ private final class IOSNativeCaptureManager: NSObject, UIGestureRecognizerDelega
     captureScrolls = config.boolValue("captureScrolls", fallback: true)
     captureTaps = config.boolValue("captureTaps", fallback: true)
     minimumScrollDelta = CGFloat(config.doubleValue("minimumScrollDelta", fallback: 24))
+    scrollEventThrottleMs = config.doubleValue("scrollEventThrottleMs", fallback: 250)
     isStarted = true
 
     registerLifecycleObservers()
@@ -449,6 +452,7 @@ private final class IOSNativeCaptureManager: NSObject, UIGestureRecognizerDelega
     captureNativeLifecycle = config.boolValue("captureNativeLifecycle", fallback: captureNativeLifecycle)
     captureScrolls = config.boolValue("captureScrolls", fallback: captureScrolls)
     captureTaps = config.boolValue("captureTaps", fallback: captureTaps)
+    scrollEventThrottleMs = config.doubleValue("scrollEventThrottleMs", fallback: scrollEventThrottleMs)
     attachGestureRecognizersIfNeeded()
     emitScreenView(reason: "resume_capture")
   }
@@ -555,6 +559,21 @@ private final class IOSNativeCaptureManager: NSObject, UIGestureRecognizerDelega
     if abs(translation.y) < minimumScrollDelta && abs(translation.x) < minimumScrollDelta {
       return
     }
+
+    // Time-throttle to match the Android plugin's scrollEventThrottleMs
+    // behavior. Without this, UIPanGestureRecognizer fires on every UITouch
+    // update (~120/sec at 120Hz), and each emit walks the view-controller
+    // tree for the screen name and crosses the Flutter platform channel,
+    // producing visible jitter during slow finger drags on ProMotion devices.
+    // We deliberately do NOT reset translation when throttled — leaving it
+    // to accumulate means the next emit reports the real cumulative motion
+    // since the last emit, not the motion since the last throttled call.
+    let nowMs = Date().timeIntervalSince1970 * 1000
+    if nowMs - lastScrollEmittedAtMs < scrollEventThrottleMs {
+      return
+    }
+    lastScrollEmittedAtMs = nowMs
+
     var attributes: [String: Any] = [
       "axis": abs(translation.y) >= abs(translation.x) ? "vertical" : "horizontal",
       "dx": translation.x,
