@@ -1,3 +1,8 @@
+## 1.1.1
+
+- Fixes Flutter-side snapshot capture being completely broken in release and profile builds. The capture path read `RenderObject.debugNeedsPaint`, which is only initialized when asserts are enabled, so every snapshot tick threw `LateInitializationError: Local 'result' has not been initialized` and the frame was dropped — release builds with `useFlutterCapture: true` (the 1.1.0 default) never uploaded any Flutter-rendered snapshots. The needs-paint guard now reads the debug getter inside an assert closure and falls back to a release-safe never-painted check.
+- Adds a source-level regression test that forbids reading debug-only framework members outside assert closures anywhere in `lib/`, since `flutter test` always enables asserts and cannot catch this class of bug directly.
+
 ## 1.1.0
 
 - Adds a Flutter-driven snapshot capture pipeline (default `useFlutterCapture: true`) that renders via `RenderRepaintBoundary.toImage` on the Flutter raster thread. Eliminates the iOS UIKit main-thread `drawHierarchy` cost (~35ms per snapshot measured on iPhone 17 ProMotion), which had been causing visible jitter during slow scrolls on 120Hz displays. Output format changes from JPEG to PNG.
