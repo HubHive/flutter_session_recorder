@@ -76,9 +76,21 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope> with Widget
     if (renderObject is! RenderRepaintBoundary) {
       return null;
     }
-    if (renderObject.debugNeedsPaint) {
-      // Tree isn't fully laid out / painted yet. Skipping is safer than
-      // forcing a paint — we'll catch up on the next tick.
+    // Tree isn't fully laid out / painted yet. Skipping is safer than
+    // forcing a paint — we'll catch up on the next tick. debugNeedsPaint is
+    // only initialized when asserts are enabled (reading it in a release
+    // build throws a LateInitializationError), so it must be read inside an
+    // assert closure; the layer null check covers the never-painted case in
+    // release, where toImage's `layer!` would otherwise throw.
+    bool needsPaint = false;
+    assert(() {
+      needsPaint = renderObject.debugNeedsPaint;
+      return true;
+    }());
+    // Reading `layer` outside a RenderObject subclass is the only
+    // release-safe way to detect the never-painted state.
+    // ignore: invalid_use_of_protected_member
+    if (needsPaint || renderObject.layer == null) {
       return null;
     }
 
