@@ -163,14 +163,14 @@ void main() {
     expect(config.nativeSnapshotInterval, const Duration(milliseconds: 1000));
     expect(config.nativeSnapshotJpegQuality, 0.65);
     expect(config.nativeSnapshotMaxDimension, 720);
-    expect(config.maxSnapshotUploadBatchSize, 10);
+    expect(config.maxSnapshotUploadBatchSize, 5);
     expect(config.snapshotUploadFlushInterval, const Duration(seconds: 5));
     expect(config.recordingDomain, 'app.hubhive.com');
     expect(config.useFlutterCapture, isTrue);
     expect(config.toJson(), containsPair('nativeSnapshotIntervalMs', 1000));
     expect(config.toJson(), containsPair('nativeSnapshotJpegQuality', 0.65));
     expect(config.toJson(), containsPair('nativeSnapshotMaxDimension', 720));
-    expect(config.toJson(), containsPair('maxSnapshotUploadBatchSize', 10));
+    expect(config.toJson(), containsPair('maxSnapshotUploadBatchSize', 5));
     expect(
       config.toJson(),
       containsPair('snapshotUploadFlushIntervalMs', 5000),
@@ -784,6 +784,56 @@ void main() {
         'snapshot_2_snapshot-1',
         'snapshot_3_snapshot-2',
       ]),
+    );
+
+    await tempDir.delete(recursive: true);
+    await nativeBridge.dispose();
+  });
+
+  test('flush never sends more snapshots per request than the batch cap',
+      () async {
+    final transport = _FakeTransport();
+    final nativeBridge = _FakeNativeBridge();
+    final sessionRecorder = SessionRecorder(
+      config: const SessionRecorderConfig.lightweight(
+        maxSnapshotUploadBatchSize: 2,
+        snapshotUploadFlushInterval: Duration(minutes: 1),
+        useFlutterCapture: false,
+      ),
+      nativeBridge: nativeBridge,
+      transport: transport,
+    );
+    final Directory tempDir =
+        await Directory.systemTemp.createTemp('session-recorder-test-');
+
+    await sessionRecorder.start();
+    for (int index = 0; index < 5; index += 1) {
+      final File snapshotFile = File('${tempDir.path}/snapshot_$index.jpg');
+      await snapshotFile.writeAsBytes(<int>[index, index + 1, index + 2]);
+      await sessionRecorder.trackNativeSnapshot(
+        contentType: 'image/jpeg',
+        filePath: snapshotFile.path,
+        format: 'jpg',
+        height: 844,
+        screenName: 'Home',
+        snapshotId: 'snapshot-$index',
+        timestamp: DateTime.utc(2026, 1, 1, 0, 0, index),
+        width: 390,
+      );
+    }
+    // Drain any backlog left behind by the per-request cap.
+    for (int attempt = 0; attempt < 5; attempt += 1) {
+      await sessionRecorder.flush();
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    await sessionRecorder.stop();
+
+    expect(transport.uploadedSnapshots, hasLength(5));
+    expect(transport.snapshotUploadBatchSizes, isNotEmpty);
+    expect(
+      transport.snapshotUploadBatchSizes.every((int size) => size <= 2),
+      isTrue,
+      reason: 'no request should exceed maxSnapshotUploadBatchSize',
     );
 
     await tempDir.delete(recursive: true);

@@ -15,8 +15,13 @@ class SessionRecorderConfig {
     this.maxLogLength = 4000,
     this.maxBatchSize = 30,
     this.minimumScrollDelta = 24,
-    this.maxSnapshotUploadBatchBytes = 4 * 1024 * 1024,
-    this.maxSnapshotUploadBatchSize = 10,
+    this.maxSnapshotUploadBatchBytes = 2 * 1024 * 1024,
+    this.maxSnapshotUploadBatchSize = 5,
+    // Hard ceiling on the unsent snapshot backlog. During a network outage
+    // failed batches are re-queued and new snapshots keep arriving; without a
+    // ceiling the pending queue (and therefore the next request body) can grow
+    // without bound. When exceeded, the oldest pending snapshots are dropped.
+    this.maxPendingSnapshotUploadBytes = 16 * 1024 * 1024,
     // 1Hz capture keeps a useful replay timeline while halving how often the
     // iOS UIWindow snapshot pipeline blocks the main thread. Hosts that want
     // higher fidelity can pass a shorter interval explicitly.
@@ -55,8 +60,9 @@ class SessionRecorderConfig {
     int maxLogLength = 4000,
     int maxBatchSize = 30,
     double minimumScrollDelta = 24,
-    int maxSnapshotUploadBatchBytes = 4 * 1024 * 1024,
-    int maxSnapshotUploadBatchSize = 10,
+    int maxSnapshotUploadBatchBytes = 2 * 1024 * 1024,
+    int maxSnapshotUploadBatchSize = 5,
+    int maxPendingSnapshotUploadBytes = 16 * 1024 * 1024,
     Duration nativeSnapshotInterval = const Duration(milliseconds: 1000),
     double nativeSnapshotJpegQuality = 0.65,
     int nativeSnapshotMaxDimension = 720,
@@ -82,6 +88,7 @@ class SessionRecorderConfig {
           minimumScrollDelta: minimumScrollDelta,
           maxSnapshotUploadBatchBytes: maxSnapshotUploadBatchBytes,
           maxSnapshotUploadBatchSize: maxSnapshotUploadBatchSize,
+          maxPendingSnapshotUploadBytes: maxPendingSnapshotUploadBytes,
           nativeSnapshotInterval: nativeSnapshotInterval,
           nativeSnapshotJpegQuality: nativeSnapshotJpegQuality,
           nativeSnapshotMaxDimension: nativeSnapshotMaxDimension,
@@ -108,6 +115,7 @@ class SessionRecorderConfig {
   final double minimumScrollDelta;
   final int maxSnapshotUploadBatchBytes;
   final int maxSnapshotUploadBatchSize;
+  final int maxPendingSnapshotUploadBytes;
   final Duration nativeSnapshotInterval;
   final double nativeSnapshotJpegQuality;
   final int nativeSnapshotMaxDimension;
@@ -136,6 +144,7 @@ class SessionRecorderConfig {
       'minimumScrollDelta': minimumScrollDelta,
       'maxSnapshotUploadBatchBytes': maxSnapshotUploadBatchBytes,
       'maxSnapshotUploadBatchSize': maxSnapshotUploadBatchSize,
+      'maxPendingSnapshotUploadBytes': maxPendingSnapshotUploadBytes,
       'nativeSnapshotIntervalMs': nativeSnapshotInterval.inMilliseconds,
       'nativeSnapshotJpegQuality': nativeSnapshotJpegQuality,
       'nativeSnapshotMaxDimension': nativeSnapshotMaxDimension,

@@ -800,6 +800,7 @@ class SessionRecorder {
 
     _pendingSnapshotUploads.add(upload);
     _pendingSnapshotUploadBytes += upload.bytes.length;
+    _enforcePendingSnapshotUploadLimit();
 
     final int maxBatchSize = config.maxSnapshotUploadBatchSize;
     final int maxBatchBytes = config.maxSnapshotUploadBatchBytes;
@@ -839,10 +840,10 @@ class SessionRecorder {
     _snapshotUploadTimer?.cancel();
     _snapshotUploadTimer = null;
 
-    final List<SessionSnapshotUpload> uploads =
-        List<SessionSnapshotUpload>.from(_pendingSnapshotUploads);
-    _pendingSnapshotUploads.clear();
-    _pendingSnapshotUploadBytes = 0;
+    final List<SessionSnapshotUpload> uploads = _takeSnapshotBatch();
+    if (uploads.isEmpty) {
+      return;
+    }
     _isUploadingSnapshots = true;
     final Future<void> inFlight = _uploadSnapshotBatch(uploads);
     _snapshotUploadInFlight = inFlight;
@@ -878,6 +879,7 @@ class SessionRecorder {
         (int total, SessionSnapshotUpload upload) =>
             total + upload.bytes.length,
       );
+      _enforcePendingSnapshotUploadLimit();
       _startSnapshotUploadTimer();
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -928,6 +930,66 @@ class SessionRecorder {
     _snapshotUploadTimer = null;
     _pendingSnapshotUploads.clear();
     _pendingSnapshotUploadBytes = 0;
+  }
+
+  /// Removes the oldest pending snapshots from the front of [uploads] until at
+  /// most [maxBatchSize] snapshots / [maxBatchBytes] bytes remain, returning
+  /// the batch to send. A single oversized snapshot is always sent on its own
+  /// so the queue can still drain. Leftover snapshots stay queued for the next
+  /// flush, so one request can never exceed the configured batch limits.
+  List<SessionSnapshotUpload> _takeSnapshotBatch() {
+    final int maxBatchSize = config.maxSnapshotUploadBatchSize;
+    final int maxBatchBytes = config.maxSnapshotUploadBatchBytes;
+    final List<SessionSnapshotUpload> batch = <SessionSnapshotUpload>[];
+    int batchBytes = 0;
+
+    while (_pendingSnapshotUploads.isNotEmpty) {
+      final SessionSnapshotUpload next = _pendingSnapshotUploads.first;
+      final int nextBytes = next.bytes.length;
+      if (batch.isNotEmpty &&
+          ((maxBatchSize > 0 && batch.length >= maxBatchSize) ||
+              (maxBatchBytes > 0 && batchBytes + nextBytes > maxBatchBytes))) {
+        break;
+      }
+      _pendingSnapshotUploads.removeAt(0);
+      _pendingSnapshotUploadBytes -= nextBytes;
+      batch.add(next);
+      batchBytes += nextBytes;
+    }
+
+    if (_pendingSnapshotUploadBytes < 0) {
+      _pendingSnapshotUploadBytes = 0;
+    }
+    return batch;
+  }
+
+  /// Caps the unsent snapshot backlog at [maxPendingSnapshotUploadBytes] by
+  /// dropping the oldest pending snapshots. Without this, a sustained upload
+  /// failure re-queues failed batches while new snapshots keep arriving, and
+  /// the backlog (and therefore the next request body) grows without bound.
+  void _enforcePendingSnapshotUploadLimit() {
+    final int maxPendingBytes = config.maxPendingSnapshotUploadBytes;
+    if (maxPendingBytes <= 0) {
+      return;
+    }
+
+    int dropped = 0;
+    while (_pendingSnapshotUploadBytes > maxPendingBytes &&
+        _pendingSnapshotUploads.length > 1) {
+      final SessionSnapshotUpload removed = _pendingSnapshotUploads.removeAt(0);
+      _pendingSnapshotUploadBytes -= removed.bytes.length;
+      dropped += 1;
+    }
+
+    if (_pendingSnapshotUploadBytes < 0) {
+      _pendingSnapshotUploadBytes = 0;
+    }
+    if (dropped > 0) {
+      debugPrint(
+        '[flutter_session_recorder] dropped $dropped pending snapshot(s) to '
+        'keep the upload backlog under ${maxPendingBytes ~/ (1024 * 1024)}MB',
+      );
+    }
   }
 
   Future<void> flush() async {
