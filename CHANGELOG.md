@@ -1,3 +1,9 @@
+## 1.1.2
+
+- Fixes snapshot uploads growing without bound on flaky networks. The flush sent the *entire* pending queue (the batch size/bytes limits only decided *when* to flush, not how much to send) and failed batches were re-queued at the front, so a sustained upload failure snowballed — fail, re-queue everything, new snapshots arrive, next request is larger, fail again — until the request body reached multiple GB and the server reset the connection mid-upload (surfacing on Android as `ClientException with SocketException: Connection reset by peer, errno 104`). Each flush now sends at most `maxSnapshotUploadBatchSize` / `maxSnapshotUploadBatchBytes` and leaves the rest queued, so a single request can never exceed the configured batch limit (a lone oversized snapshot is still sent on its own so the queue can drain).
+- Adds `maxPendingSnapshotUploadBytes` (default 16MB) — a hard ceiling on the unsent backlog. When exceeded, the oldest pending snapshots are dropped so a network outage cannot accumulate gigabytes of queued uploads.
+- Lowers the default snapshot upload batch to 2MB / 5 snapshots (was 4MB / 10) to keep request bodies comfortably under typical proxy body-size limits.
+
 ## 1.1.1
 
 - Fixes Flutter-side snapshot capture being completely broken in release and profile builds. The capture path read `RenderObject.debugNeedsPaint`, which is only initialized when asserts are enabled, so every snapshot tick threw `LateInitializationError: Local 'result' has not been initialized` and the frame was dropped — release builds with `useFlutterCapture: true` (the 1.1.0 default) never uploaded any Flutter-rendered snapshots. The needs-paint guard now reads the debug getter inside an assert closure and falls back to a release-safe never-painted check.

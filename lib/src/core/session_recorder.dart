@@ -1413,8 +1413,7 @@ class SessionRecorder {
       return;
     }
     if (type == 'native.system_modal.opened') {
-      final String label =
-          (attributes['label'] as String?) ?? 'System modal';
+      final String label = (attributes['label'] as String?) ?? 'System modal';
       _activeModalCount += 1;
       _activeModalLabel = label;
       // Pass through to the timeline so the replay viewer has its own
