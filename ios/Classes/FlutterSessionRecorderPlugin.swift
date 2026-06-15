@@ -64,12 +64,15 @@ public class FlutterSessionRecorderPlugin: NSObject, FlutterPlugin, FlutterStrea
   private func deviceContext() -> [String: Any] {
     let device = UIDevice.current
     let identifier = modelIdentifier()
+    let info = Bundle.main.infoDictionary
     return [
       "deviceType": platformDeviceType(device.userInterfaceIdiom),
       "model": friendlyModelName(for: identifier),
       "modelIdentifier": identifier,
       "osName": device.systemName,
       "osVersion": device.systemVersion,
+      "appVersion": (info?["CFBundleShortVersionString"] as? String) ?? "",
+      "appBuildNumber": (info?["CFBundleVersion"] as? String) ?? "",
     ]
   }
 

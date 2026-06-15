@@ -1277,13 +1277,28 @@ class SessionRecorder {
   Future<Map<String, Object?>> _collectSessionContext() async {
     final Map<String, Object?> deviceContext =
         await _safeCollectDeviceContext();
+    // appVersion/appBuildNumber are application-level, not device-level:
+    // lift them out of the native device map to top-level keys so the
+    // server can treat them as first-class, filterable session metadata.
+    final Object? appVersion = _nonEmptyString(deviceContext.remove('appVersion'));
+    final Object? appBuildNumber =
+        _nonEmptyString(deviceContext.remove('appBuildNumber'));
     final String? recordingDomain = config.recordingDomain?.trim();
 
     return <String, Object?>{
       if (deviceContext.isNotEmpty) 'device': deviceContext,
+      if (appVersion != null) 'appVersion': appVersion,
+      if (appBuildNumber != null) 'appBuildNumber': appBuildNumber,
       if (recordingDomain != null && recordingDomain.isNotEmpty)
         'recordingDomain': recordingDomain,
     };
+  }
+
+  Object? _nonEmptyString(Object? value) {
+    if (value is String && value.trim().isEmpty) {
+      return null;
+    }
+    return value;
   }
 
   Future<Map<String, Object?>> _safeCollectDeviceContext() async {

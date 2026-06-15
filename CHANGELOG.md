@@ -1,3 +1,7 @@
+## 1.2.0
+
+- Reports the host application's version and build number with every session. The native bridges now read `CFBundleShortVersionString` / `CFBundleVersion` on iOS and `PackageInfo.versionName` / version code on Android (API-aware: `longVersionCode` on API 28+), and the recorder lifts them to top-level `sessionContext.appVersion` / `sessionContext.appBuildNumber` — app-level fields rather than nested under `device`. No new package dependency: the values come from the existing native device-context channel. Empty values are omitted so a missing version never appears as a blank attribute. Servers can now filter and group replays by the exact version a session was recorded against.
+
 ## 1.1.2
 
 - Fixes snapshot uploads growing without bound on flaky networks. The flush sent the *entire* pending queue (the batch size/bytes limits only decided *when* to flush, not how much to send) and failed batches were re-queued at the front, so a sustained upload failure snowballed — fail, re-queue everything, new snapshots arrive, next request is larger, fail again — until the request body reached multiple GB and the server reset the connection mid-upload (surfacing on Android as `ClientException with SocketException: Connection reset by peer, errno 104`). Each flush now sends at most `maxSnapshotUploadBatchSize` / `maxSnapshotUploadBatchBytes` and leaves the rest queued, so a single request can never exceed the configured batch limit (a lone oversized snapshot is still sent on its own so the queue can drain).

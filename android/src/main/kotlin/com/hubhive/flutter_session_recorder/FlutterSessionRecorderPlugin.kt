@@ -36,14 +36,34 @@ class FlutterSessionRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHand
     private lateinit var methodChannel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private lateinit var captureManager: AndroidNativeCaptureManager
+    private lateinit var appContext: Context
     private var activity: Activity? = null
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel = MethodChannel(binding.binaryMessenger, "flutter_session_recorder/methods")
         eventChannel = EventChannel(binding.binaryMessenger, "flutter_session_recorder/events")
+        appContext = binding.applicationContext
         captureManager = AndroidNativeCaptureManager(binding.applicationContext)
         methodChannel.setMethodCallHandler(this)
         eventChannel.setStreamHandler(this)
+    }
+
+    // Reads the host application's version name and build number from
+    // its PackageInfo. Returns empty strings if the package can't be
+    // resolved so a missing version never breaks session ingest.
+    private fun appVersionInfo(): Pair<String, String> {
+        return try {
+            val info = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+            val build = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode.toString()
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toString()
+            }
+            Pair(info.versionName ?: "", build)
+        } catch (_: Exception) {
+            Pair("", "")
+        }
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -97,6 +117,7 @@ class FlutterSessionRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHand
             }
 
             "getDeviceContext" -> {
+                val (appVersion, appBuildNumber) = appVersionInfo()
                 result.success(
                     mapOf(
                         "deviceType" to "android",
@@ -108,6 +129,8 @@ class FlutterSessionRecorderPlugin : FlutterPlugin, MethodChannel.MethodCallHand
                         "osName" to "Android",
                         "osVersion" to Build.VERSION.RELEASE,
                         "sdkInt" to Build.VERSION.SDK_INT,
+                        "appVersion" to appVersion,
+                        "appBuildNumber" to appBuildNumber,
                     ),
                 )
             }
