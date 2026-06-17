@@ -18,7 +18,11 @@ abstract class SessionRecorderTransport {
     List<SessionSnapshotUpload> uploads,
   );
 
-  Future<bool> checkRecordingAccess();
+  /// Probes whether recording is currently allowed. [recordingDomain], when
+  /// provided, is sent so the server can re-check the Recording Domain
+  /// allowlist (not just the IP block) and a client paused by a domain denial
+  /// can resume the moment the domain is allow-listed again.
+  Future<bool> checkRecordingAccess({String? recordingDomain});
 }
 
 class NoopSessionRecorderTransport implements SessionRecorderTransport {
@@ -46,7 +50,7 @@ class NoopSessionRecorderTransport implements SessionRecorderTransport {
   }
 
   @override
-  Future<bool> checkRecordingAccess() async {
+  Future<bool> checkRecordingAccess({String? recordingDomain}) async {
     return true;
   }
 }
@@ -109,11 +113,12 @@ class DebugPrintSessionRecorderTransport implements SessionRecorderTransport {
   }
 
   @override
-  Future<bool> checkRecordingAccess() async {
+  Future<bool> checkRecordingAccess({String? recordingDomain}) async {
     debugPrint(
       '[flutter_session_recorder transport] ${jsonEncode(<String, Object?>{
             'type': 'recording_access.check',
             'allowed': true,
+            'recordingDomain': recordingDomain,
           })}',
     );
     return true;
@@ -309,10 +314,19 @@ class HttpSessionRecorderTransport implements SessionRecorderTransport {
   }
 
   @override
-  Future<bool> checkRecordingAccess() async {
+  Future<bool> checkRecordingAccess({String? recordingDomain}) async {
+    final Map<String, String> headers = _baseHeaders();
+    final String? domain = recordingDomain?.trim();
+    if (domain != null && domain.isNotEmpty) {
+      // The server resolves the Recording Domain from this header first
+      // (see recordingdomain.Resolve), so the probe can be re-gated on the
+      // domain allowlist, not just the IP block.
+      headers['X-Recorder-Domain'] = domain;
+    }
+
     final http.Response response = await _client.get(
       _recordingAccessEndpoint,
-      headers: _baseHeaders(),
+      headers: headers,
     );
 
     if (response.statusCode == 200) {

@@ -1199,7 +1199,9 @@ class SessionRecorder {
 
     _isCheckingRecordingAccess = true;
     try {
-      final bool hasAccess = await transport.checkRecordingAccess();
+      final bool hasAccess = await transport.checkRecordingAccess(
+        recordingDomain: config.recordingDomain,
+      );
       if (hasAccess) {
         await _restoreRecordingAccess();
       }

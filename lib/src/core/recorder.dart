@@ -6,6 +6,8 @@ import 'package:flutter/widgets.dart' as widgets;
 
 import '../flutter/session_recorder_navigator_observer.dart';
 import '../flutter/session_recorder_scope.dart';
+import 'leveled_logger.dart';
+import 'log_level.dart';
 import 'replay_document.dart';
 import 'session_recorder.dart';
 import 'session_recorder_config.dart';
@@ -319,21 +321,28 @@ class Recorder with widgets.WidgetsBindingObserver {
     recordEvent(name, properties: properties);
   }
 
-  void log(
-    String message, {
-    String level = 'info',
-    String? logger,
-    Map<String, Object?> properties = const <String, Object?>{},
-  }) {
-    _runOrQueue(
-      (SessionRecorder sessionRecorder) => sessionRecorder.trackLog(
-        level: level,
-        logger: logger,
-        message: message,
-        properties: properties,
-      ),
-    );
-  }
+  /// Leveled log facade.
+  ///
+  /// Use `recorder.log.debug/info/warn/error(...)` to emit a `log` event at a
+  /// typed [LogLevel]. Calling `recorder.log(...)` directly with a string
+  /// `level` is deprecated but still supported.
+  late final LeveledLogger log = LeveledLogger(
+    ({
+      required String message,
+      required LogLevel level,
+      String? logger,
+      Map<String, Object?> properties = const <String, Object?>{},
+    }) {
+      _runOrQueue(
+        (SessionRecorder sessionRecorder) => sessionRecorder.trackLog(
+          level: level.wireValue,
+          logger: logger,
+          message: message,
+          properties: properties,
+        ),
+      );
+    },
+  );
 
   void error(
     Object error, {
@@ -498,9 +507,8 @@ class Recorder with widgets.WidgetsBindingObserver {
         if (message != null &&
             message.isNotEmpty &&
             !message.startsWith(_internalLogPrefix)) {
-          log(
+          log.debug(
             message,
-            level: 'debug',
             logger: 'debugPrint',
           );
         }

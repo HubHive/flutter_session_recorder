@@ -154,12 +154,14 @@ recorder.recordEvent(
 Capture logs and errors:
 
 ```dart
-recorder.log(
+// Leveled logging — one method per level (debug / info / warn / error).
+recorder.log.warn(
   'validation failed',
-  level: 'warning',
   logger: 'checkout',
+  properties: {'field': 'cartId'},
 );
 
+// `recorder.error(...)` is a separate error event, not a log level.
 recorder.error(
   StateError('Missing cart id'),
   logger: 'checkout',

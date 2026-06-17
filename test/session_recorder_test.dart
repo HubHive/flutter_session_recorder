@@ -14,6 +14,7 @@ class _FakeTransport implements SessionRecorderTransport {
       <_UploadedSnapshotRecord>[];
   int accessCheckCount = 0;
   bool hasRecordingAccess = true;
+  final List<String?> accessCheckDomains = <String?>[];
   Object? sendError;
   Object? uploadError;
 
@@ -54,8 +55,9 @@ class _FakeTransport implements SessionRecorderTransport {
   }
 
   @override
-  Future<bool> checkRecordingAccess() async {
+  Future<bool> checkRecordingAccess({String? recordingDomain}) async {
     accessCheckCount += 1;
+    accessCheckDomains.add(recordingDomain);
     return hasRecordingAccess;
   }
 }
@@ -882,6 +884,66 @@ void main() {
     expect(nativeBridge.snapshotStarted, isFalse);
     expect(transport.accessCheckCount, greaterThan(0));
     expect(await snapshotFile.exists(), isFalse);
+
+    await sessionRecorder.stop();
+    await tempDir.delete(recursive: true);
+    await nativeBridge.dispose();
+  });
+
+  test(
+      'access probe carries the recording domain and resumes once it is allowed',
+      () async {
+    final transport = _FakeTransport()
+      ..uploadError = const SessionRecorderTransportException(
+        'forbidden',
+        statusCode: 403,
+      )
+      ..hasRecordingAccess = false;
+    final nativeBridge = _FakeNativeBridge();
+    final sessionRecorder = SessionRecorder(
+      config: const SessionRecorderConfig.lightweight(
+        maxSnapshotUploadBatchSize: 1,
+        recordingAccessCheckInterval: Duration(milliseconds: 1),
+        recordingDomain: 'app.hubhive.com',
+        useFlutterCapture: false,
+      ),
+      nativeBridge: nativeBridge,
+      transport: transport,
+    );
+    final Directory tempDir =
+        await Directory.systemTemp.createTemp('session-recorder-test-');
+    final File snapshotFile = File('${tempDir.path}/snapshot.jpg');
+    await snapshotFile.writeAsBytes(<int>[1, 2, 3]);
+
+    await sessionRecorder.start();
+    final String? deniedSessionId = sessionRecorder.sessionId;
+    await sessionRecorder.trackNativeSnapshot(
+      contentType: 'image/jpeg',
+      filePath: snapshotFile.path,
+      format: 'jpg',
+      height: 844,
+      screenName: 'Home',
+      snapshotId: 'snapshot-domain-403',
+      timestamp: DateTime.utc(2026),
+      width: 390,
+    );
+    await sessionRecorder.flush();
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+
+    // Paused, and the probe re-checks the configured recording domain so the
+    // server can re-gate on the domain allowlist rather than just the IP.
+    expect(sessionRecorder.isRecordingAccessDenied, isTrue);
+    expect(transport.accessCheckCount, greaterThan(0));
+    expect(transport.accessCheckDomains, everyElement('app.hubhive.com'));
+
+    // The domain gets allow-listed again: the next probe resumes recording
+    // under a fresh session with the stale snapshot backlog cleared.
+    transport.hasRecordingAccess = true;
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+
+    expect(sessionRecorder.isRecordingAccessDenied, isFalse);
+    expect(sessionRecorder.isCapturePaused, isFalse);
+    expect(sessionRecorder.sessionId, isNot(deniedSessionId));
 
     await sessionRecorder.stop();
     await tempDir.delete(recursive: true);

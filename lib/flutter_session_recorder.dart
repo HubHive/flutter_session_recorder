@@ -1,3 +1,5 @@
+export 'src/core/leveled_logger.dart';
+export 'src/core/log_level.dart';
 export 'src/core/recorder_event.dart';
 export 'src/core/recorder.dart';
 export 'src/core/replay_document.dart';
