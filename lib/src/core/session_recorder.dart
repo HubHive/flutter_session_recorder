@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'crash_sentinel.dart';
 import 'recorder_event.dart';
 import 'replay_document.dart';
 import 'session_batch.dart';
@@ -52,16 +53,22 @@ class SessionRecorder {
     SessionRecorderNativeBridge? nativeBridge,
     DateTime Function()? now,
     this.transport = const NoopSessionRecorderTransport(),
+    CrashSentinel? crashSentinel,
   })  : _idGenerator = idGenerator ?? _defaultIdGenerator,
         _nativeBridge =
             nativeBridge ?? MethodChannelSessionRecorderNativeBridge(),
-        _now = now ?? DateTime.now;
+        _now = now ?? DateTime.now,
+        _crashSentinel = crashSentinel ?? const SharedPreferencesCrashSentinel();
 
   final SessionRecorderConfig config;
   final String Function() _idGenerator;
   final SessionRecorderNativeBridge _nativeBridge;
   final DateTime Function() _now;
   final SessionRecorderTransport transport;
+  // Persists a liveness record across launches so the next launch can tell
+  // this run died uncleanly in the foreground — a force-quit (true crash),
+  // distinct from merely emitting an `error` event. See crash_sentinel.dart.
+  final CrashSentinel _crashSentinel;
 
   final List<RecorderEvent> _buffer = <RecorderEvent>[];
   final List<SessionSnapshotUpload> _pendingSnapshotUploads =
@@ -174,6 +181,11 @@ class SessionRecorder {
       return;
     }
 
+    // Read the previous run's liveness record BEFORE overwriting it: a
+    // record that survived to this launch means that run never shut down
+    // cleanly, and a foreground death is a force-quit (true crash).
+    final CrashSentinelState? previousRun = await _crashSentinel.read();
+
     _sessionId = _idGenerator();
     _startedAt = _now().toUtc();
     _userId = userId;
@@ -205,6 +217,12 @@ class SessionRecorder {
         },
       ),
     );
+
+    // Report a prior foreground death (force-quit) on this fresh Session's
+    // stream — the server attributes it back to the named dead Session —
+    // then arm the sentinel for this run.
+    _reportPreviousForceQuit(previousRun);
+    unawaited(_writeCrashSentinel(foreground: true));
   }
 
   Future<void> stop({
@@ -237,6 +255,9 @@ class SessionRecorder {
     try {
       await flush();
     } finally {
+      // A graceful stop is the canonical clean exit: drop the sentinel so
+      // the next launch sees no crash.
+      unawaited(_clearCrashSentinel());
       _buffer.clear();
       _clearPendingSnapshotUploads();
       _sessionHistory.clear();
@@ -1063,6 +1084,64 @@ class SessionRecorder {
     }
   }
 
+  /// Lifecycle hook: the app entered the foreground. Marks the sentinel
+  /// foreground so a subsequent unclean death is recognised as a force-quit.
+  void noteForegrounded() {
+    unawaited(_writeCrashSentinel(foreground: true));
+  }
+
+  /// Lifecycle hook: the app left the foreground. A death from here on is
+  /// the OS reclaiming a backgrounded app, not a force-quit, so the sentinel
+  /// is marked background and the next launch will not count it as a crash.
+  void noteBackgrounded() {
+    unawaited(_writeCrashSentinel(foreground: false));
+  }
+
+  // Emits an `app.force_quit` event when the previous run's sentinel shows
+  // it died uncleanly while in the foreground. A null/background record is
+  // not a crash and is silently dropped. Must run while recording so the
+  // event lands on the new Session's stream.
+  void _reportPreviousForceQuit(CrashSentinelState? previousRun) {
+    if (previousRun == null || !previousRun.foreground) {
+      return;
+    }
+    _enqueue(
+      RecorderEvent(
+        type: 'app.force_quit',
+        attributes: <String, Object?>{
+          'crashedSessionId': previousRun.sessionId,
+          'crashedAt': previousRun.at?.toIso8601String(),
+        },
+      ),
+    );
+  }
+
+  Future<void> _writeCrashSentinel({required bool foreground}) async {
+    final String? sessionId = _sessionId;
+    if (sessionId == null) {
+      return;
+    }
+    try {
+      await _crashSentinel.write(
+        CrashSentinelState(
+          sessionId: sessionId,
+          foreground: foreground,
+          at: _now().toUtc(),
+        ),
+      );
+    } catch (_) {
+      // Crash detection is best-effort and must never break recording.
+    }
+  }
+
+  Future<void> _clearCrashSentinel() async {
+    try {
+      await _crashSentinel.clear();
+    } catch (_) {
+      // Best-effort; a stale sentinel is corrected by the foreground check.
+    }
+  }
+
   void _notifyCaptureStateListeners({
     required bool isPaused,
   }) {
@@ -1121,6 +1200,9 @@ class SessionRecorder {
     _userId = nextUserId;
     _userProperties = Map<String, Object?>.from(nextUserProperties);
     _pausedAt = null;
+    // The old Session ended cleanly (session.stopped above); re-arm the
+    // sentinel for the new in-process Session without reporting a crash.
+    unawaited(_writeCrashSentinel(foreground: true));
 
     if (restartCaptureIfNeeded) {
       await _resumeNativeCapture();

@@ -576,8 +576,28 @@ class Recorder with widgets.WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(widgets.AppLifecycleState state) {
-    if (!_sessionRecorder.config.pauseOnBackground ||
-        !_sessionRecorder.isRecording) {
+    if (!_sessionRecorder.isRecording) {
+      return;
+    }
+
+    // Track foreground/background for force-quit detection FIRST, and
+    // independently of the pauseOnBackground capture policy: a death only
+    // counts as a crash if the app was last seen foreground, regardless of
+    // whether capture pauses in the background.
+    switch (state) {
+      case widgets.AppLifecycleState.resumed:
+        _sessionRecorder.noteForegrounded();
+        break;
+      case widgets.AppLifecycleState.hidden:
+      case widgets.AppLifecycleState.paused:
+      case widgets.AppLifecycleState.detached:
+        _sessionRecorder.noteBackgrounded();
+        break;
+      case widgets.AppLifecycleState.inactive:
+        break;
+    }
+
+    if (!_sessionRecorder.config.pauseOnBackground) {
       return;
     }
 

@@ -105,6 +105,14 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope> with Widget
       pixelRatio = math.min(devicePixelRatio, maxDimension / longestSide);
     }
 
+    // The captured image is sized in physical pixels (boundarySize *
+    // pixelRatio), but interaction events (taps) are recorded in logical
+    // pixels. The replay viewer needs the logical dimensions to place
+    // interaction markers in the same coordinate space; ship them alongside
+    // the physical image dimensions.
+    final int logicalWidth = boundarySize.width.round();
+    final int logicalHeight = boundarySize.height.round();
+
     // If an iOS system modal is currently presented over the Flutter view,
     // toImage would only capture the (likely dimmed) Flutter content
     // underneath — misleading in replay. Substitute a labeled placeholder
@@ -113,7 +121,13 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope> with Widget
     if (modalLabel != null) {
       final int imageWidth = (boundarySize.width * pixelRatio).round();
       final int imageHeight = (boundarySize.height * pixelRatio).round();
-      return _generateModalPlaceholder(modalLabel, imageWidth, imageHeight);
+      return _generateModalPlaceholder(
+        modalLabel,
+        imageWidth,
+        imageHeight,
+        logicalWidth,
+        logicalHeight,
+      );
     }
 
     // The keyboard, when open, lives outside the Flutter view (iOS-managed
@@ -177,6 +191,8 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope> with Widget
         width: imageToEncode.width,
         height: imageToEncode.height,
         metadata: <String, Object?>{
+          'logicalWidth': logicalWidth,
+          'logicalHeight': logicalHeight,
           if (platformViews.isNotEmpty)
             'platformViews': <Map<String, Object?>>[
               for (final _PlatformViewInfo info in platformViews)
@@ -208,6 +224,8 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope> with Widget
     String label,
     int width,
     int height,
+    int logicalWidth,
+    int logicalHeight,
   ) async {
     if (width <= 0 || height <= 0) {
       return null;
@@ -261,6 +279,8 @@ class _SessionRecorderScopeState extends State<SessionRecorderScope> with Widget
         metadata: <String, Object?>{
           'placeholder': 'system_modal',
           'modalLabel': label,
+          'logicalWidth': logicalWidth,
+          'logicalHeight': logicalHeight,
         },
       );
     } finally {

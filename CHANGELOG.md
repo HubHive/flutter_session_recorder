@@ -1,3 +1,9 @@
+## 2.1.0
+
+- Detects force-quits (true crashes). The recorder persists a small liveness "crash sentinel" across launches (via `shared_preferences`) and tracks foreground/background lifecycle transitions independently of the `pauseOnBackground` capture policy. When a launch finds the previous run died while foregrounded, it emits an `app.force_quit` event on the new session naming the dead session (`crashedSessionId`). A death last seen backgrounded (the OS reclaiming memory) is not counted as a crash, and a graceful `stop()` clears the sentinel. Adds `SessionRecorder.noteForegrounded()` / `noteBackgrounded()` and exports `CrashSentinel`.
+- **New dependency:** `shared_preferences: ^2.2.0`, used to persist the crash sentinel across launches.
+- Fixes tap/interaction markers being drawn in the wrong location in the replay viewer. Snapshots are captured in physical pixels (`boundarySize * pixelRatio`, clamped by `nativeSnapshotMaxDimension`) while taps are recorded in logical pixels, so the viewer was scaling markers against the wrong coordinate space — pushing them off toward the edges. The Flutter capture now ships `logicalWidth` / `logicalHeight` in each snapshot's metadata so the viewer can place interaction markers correctly.
+
 ## 2.0.0
 
 - **Breaking:** `SessionRecorderTransport.checkRecordingAccess()` now takes an optional `{String? recordingDomain}`. Direct callers and the built-in `HttpSessionRecorderTransport`/`NoopSessionRecorderTransport`/`DebugPrintSessionRecorderTransport` are unaffected, but any custom `SessionRecorderTransport` implementation must update its override signature to `checkRecordingAccess({String? recordingDomain})`.

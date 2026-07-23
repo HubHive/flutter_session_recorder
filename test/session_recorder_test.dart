@@ -149,6 +149,30 @@ class _FakeNativeBridge implements SessionRecorderNativeBridge {
   Future<void> dispose() => _controller.close();
 }
 
+/// In-memory [CrashSentinel] for hermetic force-quit tests. Holds one
+/// record (like the real on-disk slot) and counts clears so tests can
+/// assert a clean shutdown wiped it.
+class _FakeCrashSentinel implements CrashSentinel {
+  _FakeCrashSentinel([this._state]);
+
+  CrashSentinelState? _state;
+  int clearCount = 0;
+
+  @override
+  Future<CrashSentinelState?> read() async => _state;
+
+  @override
+  Future<void> write(CrashSentinelState state) async {
+    _state = state;
+  }
+
+  @override
+  Future<void> clear() async {
+    clearCount += 1;
+    _state = null;
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -1001,5 +1025,150 @@ void main() {
     expect(properties['nan'], isNull);
     expect(properties['infinity'], isNull);
     expect(properties['valid'], 1.5);
+  });
+
+  group('force-quit detection', () {
+    SessionRecorder buildRecorder({
+      required CrashSentinel crashSentinel,
+      required _FakeTransport transport,
+      required _FakeNativeBridge nativeBridge,
+    }) {
+      return SessionRecorder(
+        config: const SessionRecorderConfig.lightweight(
+          recordingDomain: 'app.hubhive.com',
+        ),
+        nativeBridge: nativeBridge,
+        transport: transport,
+        crashSentinel: crashSentinel,
+      );
+    }
+
+    test(
+        'a prior foreground death emits an app.force_quit naming the dead '
+        'session', () async {
+      final transport = _FakeTransport();
+      final nativeBridge = _FakeNativeBridge();
+      // A sentinel left behind by a previous run that was last seen
+      // foreground — the signature of a force-quit.
+      final sentinel = _FakeCrashSentinel(
+        const CrashSentinelState(sessionId: 'dead_session', foreground: true),
+      );
+      final recorder = buildRecorder(
+        crashSentinel: sentinel,
+        transport: transport,
+        nativeBridge: nativeBridge,
+      );
+
+      await recorder.start();
+      await recorder.stop();
+
+      final List<RecorderEvent> events = transport.batches
+          .expand((SessionBatch batch) => batch.events)
+          .toList(growable: false);
+      final Iterable<RecorderEvent> forceQuits =
+          events.where((RecorderEvent e) => e.type == 'app.force_quit');
+      expect(forceQuits, hasLength(1),
+          reason: 'a foreground death must report exactly one crash');
+      expect(forceQuits.single.attributes['crashedSessionId'], 'dead_session');
+
+      await nativeBridge.dispose();
+    });
+
+    test('a prior background death is not counted as a crash', () async {
+      final transport = _FakeTransport();
+      final nativeBridge = _FakeNativeBridge();
+      // Last seen backgrounded — the OS reclaiming memory, not a force-quit.
+      final sentinel = _FakeCrashSentinel(
+        const CrashSentinelState(sessionId: 'bg_session', foreground: false),
+      );
+      final recorder = buildRecorder(
+        crashSentinel: sentinel,
+        transport: transport,
+        nativeBridge: nativeBridge,
+      );
+
+      await recorder.start();
+      await recorder.stop();
+
+      final bool anyForceQuit = transport.batches
+          .expand((SessionBatch batch) => batch.events)
+          .any((RecorderEvent e) => e.type == 'app.force_quit');
+      expect(anyForceQuit, isFalse,
+          reason: 'a backgrounded app dying is not a force-quit');
+
+      await nativeBridge.dispose();
+    });
+
+    test('a clean start with no prior record reports no crash and arms the '
+        'sentinel', () async {
+      final transport = _FakeTransport();
+      final nativeBridge = _FakeNativeBridge();
+      final sentinel = _FakeCrashSentinel();
+      final recorder = buildRecorder(
+        crashSentinel: sentinel,
+        transport: transport,
+        nativeBridge: nativeBridge,
+      );
+
+      await recorder.start();
+
+      final bool anyForceQuit = transport.batches
+          .expand((SessionBatch batch) => batch.events)
+          .any((RecorderEvent e) => e.type == 'app.force_quit');
+      expect(anyForceQuit, isFalse);
+      // The live run armed the sentinel, foreground, naming the live session.
+      expect(sentinel._state?.foreground, isTrue);
+      expect(sentinel._state?.sessionId, recorder.sessionId);
+
+      await recorder.stop();
+      await nativeBridge.dispose();
+    });
+
+    test('a graceful stop clears the sentinel so the next launch sees no '
+        'crash', () async {
+      final transport = _FakeTransport();
+      final nativeBridge = _FakeNativeBridge();
+      final sentinel = _FakeCrashSentinel();
+      final recorder = buildRecorder(
+        crashSentinel: sentinel,
+        transport: transport,
+        nativeBridge: nativeBridge,
+      );
+
+      await recorder.start();
+      await recorder.stop();
+
+      expect(sentinel.clearCount, greaterThanOrEqualTo(1));
+      expect(sentinel._state, isNull,
+          reason: 'a clean shutdown must leave nothing to incriminate it');
+
+      await nativeBridge.dispose();
+    });
+
+    test('noteBackgrounded flips the armed sentinel to background', () async {
+      final transport = _FakeTransport();
+      final nativeBridge = _FakeNativeBridge();
+      final sentinel = _FakeCrashSentinel();
+      final recorder = buildRecorder(
+        crashSentinel: sentinel,
+        transport: transport,
+        nativeBridge: nativeBridge,
+      );
+
+      await recorder.start();
+      expect(sentinel._state?.foreground, isTrue);
+
+      recorder.noteBackgrounded();
+      await Future<void>.delayed(Duration.zero);
+      expect(sentinel._state?.foreground, isFalse,
+          reason: 'a death while backgrounded must not later count as a crash');
+
+      recorder.noteForegrounded();
+      await Future<void>.delayed(Duration.zero);
+      expect(sentinel._state?.foreground, isTrue);
+
+      await recorder.stop();
+      await nativeBridge.dispose();
+    });
   });
 }

@@ -1,3 +1,4 @@
+export 'src/core/crash_sentinel.dart';
 export 'src/core/leveled_logger.dart';
 export 'src/core/log_level.dart';
 export 'src/core/recorder_event.dart';
