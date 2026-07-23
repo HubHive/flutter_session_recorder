@@ -1,3 +1,7 @@
+## 2.2.0
+
+- Adds `recorder.log.exception(error, {stackTrace, summary, logger, properties})` — logs a caught exception as exactly **one** error-level `log` event whose `message` is a *stable* string (the caller-supplied `summary`, else `error.runtimeType`). The volatile exception text and stack trace are folded into `properties` under the `error` / `stackTrace` keys instead of the message. This replaces the common pattern of emitting two `error(...)` calls per catch block (one for the exception, one for `stackTrace.toString()`), whose second message is a whole stack trace — unique per occurrence and therefore poison to any downstream error triage that fingerprints on `recordingDomain + logger + masked(message)`. Caller-supplied `properties` are merged first; the `error` and `stackTrace` keys always win.
+
 ## 2.1.0
 
 - Detects force-quits (true crashes). The recorder persists a small liveness "crash sentinel" across launches (via `shared_preferences`) and tracks foreground/background lifecycle transitions independently of the `pauseOnBackground` capture policy. When a launch finds the previous run died while foregrounded, it emits an `app.force_quit` event on the new session naming the dead session (`crashedSessionId`). A death last seen backgrounded (the OS reclaiming memory) is not counted as a crash, and a graceful `stop()` clears the sentinel. Adds `SessionRecorder.noteForegrounded()` / `noteBackgrounded()` and exports `CrashSentinel`.
