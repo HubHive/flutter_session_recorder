@@ -124,6 +124,55 @@ void main() {
     expect(event.attributes['logger'], 'boot');
   });
 
+  test('recorder.log.exception emits a single error log with a stable message',
+      () async {
+    final transport = _FakeTransport();
+    await recorder.initialize(transport: transport);
+
+    recorder.log.exception(
+      StateError('parent 123 not found'),
+      stackTrace: StackTrace.fromString('#0 foo\n#1 bar'),
+      logger: 'PostAPIService.createPost',
+      properties: <String, Object?>{'entity_type': 'hive'},
+    );
+
+    await recorder.stop();
+
+    final RecorderEvent event = _logEvents(transport).single;
+    expect(event.attributes['level'], 'error');
+    // Message is the exception runtimeType — stable across occurrences, so the
+    // volatile "parent 123 not found" text never reaches the fingerprint.
+    expect(event.attributes['message'], 'StateError');
+    expect(event.attributes['logger'], 'PostAPIService.createPost');
+
+    final Map<String, Object?> properties =
+        Map<String, Object?>.from(event.attributes['properties']! as Map);
+    expect(properties['entity_type'], 'hive');
+    expect(properties['error'], contains('parent 123 not found'));
+    expect(properties['stackTrace'], contains('#0 foo'));
+  });
+
+  test('recorder.log.exception prefers a caller-supplied summary', () async {
+    final transport = _FakeTransport();
+    await recorder.initialize(transport: transport);
+
+    recorder.log.exception(
+      Exception('boom'),
+      summary: 'createPost failed',
+      logger: 'checkout',
+    );
+
+    await recorder.stop();
+
+    final RecorderEvent event = _logEvents(transport).single;
+    expect(event.attributes['message'], 'createPost failed');
+    final Map<String, Object?> properties =
+        Map<String, Object?>.from(event.attributes['properties']! as Map);
+    expect(properties['error'], contains('boom'));
+    // No stack trace passed — the key is omitted, not null.
+    expect(properties.containsKey('stackTrace'), isFalse);
+  });
+
   test('recorder.error still emits a separate error event, not a log',
       () async {
     final transport = _FakeTransport();

@@ -90,4 +90,39 @@ class LeveledLogger {
       properties: properties,
     );
   }
+
+  /// Logs a caught exception as exactly one error-level `log` event.
+  ///
+  /// The event's `message` is a *stable* string — the caller-supplied
+  /// [summary] when given, otherwise `error.runtimeType` — so downstream error
+  /// triage can fingerprint on it. The volatile parts (the exception text and
+  /// the stack trace) are folded into [properties] under the `error` and
+  /// `stackTrace` keys instead of the message, so they never poison the
+  /// fingerprint.
+  ///
+  /// Prefer this over emitting two `error(...)` calls (one for the exception,
+  /// one for `stackTrace.toString()`): the second call's message is a whole
+  /// stack trace, which is unique per occurrence and defeats deduplication.
+  ///
+  /// Caller-supplied [properties] are merged first; the `error` and
+  /// `stackTrace` keys always win. Keep [properties] small and
+  /// JSON-serializable.
+  void exception(
+    Object error, {
+    StackTrace? stackTrace,
+    String? summary,
+    String? logger,
+    Map<String, Object?> properties = const <String, Object?>{},
+  }) {
+    _sink(
+      message: summary ?? error.runtimeType.toString(),
+      level: LogLevel.error,
+      logger: logger,
+      properties: <String, Object?>{
+        ...properties,
+        'error': error.toString(),
+        if (stackTrace != null) 'stackTrace': stackTrace.toString(),
+      },
+    );
+  }
 }
