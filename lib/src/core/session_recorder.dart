@@ -92,6 +92,10 @@ class SessionRecorder {
   bool _isFlutterCaptureInFlight = false;
   bool _nativeSnapshotCaptureRequested = false;
   int _pendingSnapshotUploadBytes = 0;
+  // Circuit-breaker state. See [_noteTransportFailure].
+  int _consecutiveTransportFailures = 0;
+  DateTime? _transportCircuitOpenUntil;
+  bool _isHandlingTransportFailure = false;
   int _flutterSnapshotSequence = 0;
   Future<void>? _snapshotUploadInFlight;
   FlutterCaptureCallback? _flutterCaptureCallback;
@@ -815,7 +819,10 @@ class SessionRecorder {
   }
 
   void _queueSnapshotUpload(SessionSnapshotUpload upload) {
-    if (!isRecording || _isCapturePaused || _isRecordingAccessDenied) {
+    if (!isRecording ||
+        _isCapturePaused ||
+        _isRecordingAccessDenied ||
+        _isTransportCircuitOpen) {
       return;
     }
 
@@ -848,6 +855,9 @@ class SessionRecorder {
   }
 
   Future<void> _flushSnapshotUploads() async {
+    if (_isTransportCircuitOpen) {
+      return;
+    }
     if (_isUploadingSnapshots) {
       await _snapshotUploadInFlight;
       if (_isRecordingAccessDenied || _pendingSnapshotUploads.isEmpty) {
@@ -901,17 +911,20 @@ class SessionRecorder {
             total + upload.bytes.length,
       );
       _enforcePendingSnapshotUploadLimit();
-      _startSnapshotUploadTimer();
-      FlutterError.reportError(
-        FlutterErrorDetails(
-          exception: error,
-          stack: stackTrace,
-          library: 'flutter_session_recorder',
-          context: ErrorDescription('while uploading a snapshot batch'),
-        ),
+      await _noteTransportFailure(
+        error,
+        stackTrace,
+        'while uploading a snapshot batch',
       );
+      // Only keep retrying while the breaker is closed; once it opens the queue
+      // has already been dropped and capture stopped.
+      if (!_isTransportCircuitOpen) {
+        _startSnapshotUploadTimer();
+      }
       return;
     }
+
+    _noteTransportSuccess();
 
     for (int index = 0; index < uploads.length; index += 1) {
       final SessionSnapshotUpload upload = uploads[index];
@@ -1020,6 +1033,7 @@ class SessionRecorder {
     final DateTime? startedAt = _startedAt;
     if (_isFlushing ||
         _isRecordingAccessDenied ||
+        _isTransportCircuitOpen ||
         sessionId == null ||
         startedAt == null ||
         _buffer.isEmpty) {
@@ -1044,20 +1058,24 @@ class SessionRecorder {
           userProperties: Map<String, Object?>.from(_userProperties),
         ),
       );
+      _noteTransportSuccess();
     } catch (error, stackTrace) {
       if (await _handleTransportError(error)) {
         return;
       }
       _buffer.insertAll(0, events);
-      FlutterError.reportError(
-        FlutterErrorDetails(
-          exception: error,
-          stack: stackTrace,
-          library: 'flutter_session_recorder',
-          context: ErrorDescription('while uploading a session batch'),
-        ),
+      _trimBuffers();
+      // Deliberately not rethrown. `flush()` is called through `unawaited(...)`,
+      // so rethrowing surfaced as an unhandled async error -> the host's
+      // platform-error hook -> another recorded event: a second amplification
+      // path for the very failure being reported. The breaker below is how a
+      // failing transport is surfaced and bounded instead.
+      await _noteTransportFailure(
+        error,
+        stackTrace,
+        'while uploading a session batch',
       );
-      rethrow;
+      return;
     } finally {
       _isFlushing = false;
       if (_buffer.length >= config.maxBatchSize) {
@@ -1076,11 +1094,153 @@ class SessionRecorder {
       return;
     }
 
+    // Break the feedback loop. A transport failure is reported as an error, the
+    // host's error hook turns errors into events, and events trigger the flush
+    // that just failed — so recording our own failure manufactures more of the
+    // work that is failing. Events raised while we are handling a transport
+    // failure are dropped: they could not be uploaded anyway, and the first
+    // failure of each streak is still surfaced by [_noteTransportFailure].
+    if (_isHandlingTransportFailure) {
+      return;
+    }
+
     _buffer.add(event);
     _sessionHistory.add(event);
+    _trimBuffers();
 
     if (_buffer.length >= config.maxBatchSize) {
       unawaited(flush());
+    }
+  }
+
+  /// Number of events waiting to be uploaded. Bounded by
+  /// [SessionRecorderConfig.maxBufferedEvents].
+  @visibleForTesting
+  int get bufferedEventCountForTesting => _buffer.length;
+
+  /// Number of events retained for [buildReplayDocument]. Bounded by
+  /// [SessionRecorderConfig.maxSessionHistoryEvents].
+  @visibleForTesting
+  int get sessionHistoryCountForTesting => _sessionHistory.length;
+
+  /// Number of captured-but-unsent snapshots.
+  @visibleForTesting
+  int get pendingSnapshotCountForTesting => _pendingSnapshotUploads.length;
+
+  /// True while the breaker is open and uploads/capture are suspended.
+  @visibleForTesting
+  bool get isTransportSuspendedForTesting => _isTransportCircuitOpen;
+
+  /// Enforces the hard ceilings on both retained event lists, dropping the
+  /// OLDEST entries first.
+  ///
+  /// Neither list was bounded before: `maxBatchSize` only triggers a flush, and
+  /// `_sessionHistory` was appended to for every event and trimmed only when the
+  /// session restarted. With an unreachable endpoint, failed batches are
+  /// re-queued while new events keep arriving, so both grew for the life of the
+  /// process — each event holding its message and stack-trace strings.
+  void _trimBuffers() {
+    final int maxBuffered = config.maxBufferedEvents;
+    if (maxBuffered > 0 && _buffer.length > maxBuffered) {
+      _buffer.removeRange(0, _buffer.length - maxBuffered);
+    }
+    final int maxHistory = config.maxSessionHistoryEvents;
+    if (maxHistory > 0 && _sessionHistory.length > maxHistory) {
+      _sessionHistory.removeRange(0, _sessionHistory.length - maxHistory);
+    }
+  }
+
+  /// True while the breaker is open — the endpoint has failed repeatedly and we
+  /// are waiting out the backoff. Uploads AND capture are suspended, so an
+  /// unreachable endpoint costs nothing instead of compounding.
+  bool get _isTransportCircuitOpen {
+    final DateTime? openUntil = _transportCircuitOpenUntil;
+    if (openUntil == null) {
+      return false;
+    }
+    if (_now().isBefore(openUntil)) {
+      return true;
+    }
+    // Backoff expired: allow one probe through. The streak counter is kept, so a
+    // failed probe re-opens the breaker with a longer backoff.
+    _transportCircuitOpenUntil = null;
+    return false;
+  }
+
+  /// Records a transport failure and opens the breaker once the failures become
+  /// a streak.
+  ///
+  /// Deliberately does NOT `FlutterError.reportError` every failure. Doing that
+  /// is what turned an unreachable endpoint into unbounded growth: the host's
+  /// error hook converts each reported error into an event, and events drive the
+  /// flush that is failing. Only the FIRST failure of a streak is reported, so
+  /// the problem is still visible without being self-feeding.
+  Future<void> _noteTransportFailure(
+    Object error,
+    StackTrace stackTrace,
+    String context,
+  ) async {
+    _consecutiveTransportFailures += 1;
+    final bool isFirstOfStreak = _consecutiveTransportFailures == 1;
+
+    final int threshold = config.maxConsecutiveTransportFailures;
+    if (threshold > 0 && _consecutiveTransportFailures >= threshold) {
+      // Exponential backoff on the number of completed streaks past the
+      // threshold, capped so it can never overflow into an absurd delay.
+      final int overshoot =
+          (_consecutiveTransportFailures - threshold).clamp(0, 20);
+      final int multiplier = 1 << overshoot;
+      Duration backoff = config.transportFailureBackoff * multiplier;
+      if (backoff > config.maxTransportFailureBackoff) {
+        backoff = config.maxTransportFailureBackoff;
+      }
+      _transportCircuitOpenUntil = _now().add(backoff);
+
+      // Nothing queued can be delivered while the endpoint is down, and holding
+      // it only costs memory. Drop it and stop making more.
+      _buffer.clear();
+      _clearPendingSnapshotUploads();
+      _stopFlutterSnapshotTimer();
+
+      debugPrint(
+        '[flutter_session_recorder] $context failed '
+        '$_consecutiveTransportFailures times in a row; suspending capture and '
+        'uploads for ${backoff.inSeconds}s. Queued data dropped.',
+      );
+    }
+
+    if (!isFirstOfStreak) {
+      return;
+    }
+
+    // Guarded: the report below re-enters the host error hook, which calls back
+    // into `_enqueue`. The guard makes that a no-op instead of a loop.
+    _isHandlingTransportFailure = true;
+    try {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'flutter_session_recorder',
+          context: ErrorDescription(context),
+          silent: true,
+        ),
+      );
+    } finally {
+      _isHandlingTransportFailure = false;
+    }
+  }
+
+  /// A delivery succeeded: close the breaker and forget the streak.
+  void _noteTransportSuccess() {
+    if (_consecutiveTransportFailures == 0 &&
+        _transportCircuitOpenUntil == null) {
+      return;
+    }
+    _consecutiveTransportFailures = 0;
+    _transportCircuitOpenUntil = null;
+    if (config.useFlutterCapture && isRecording && !_isCapturePaused) {
+      _startFlutterSnapshotTimer();
     }
   }
 
